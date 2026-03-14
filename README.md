@@ -1,5 +1,9 @@
 # kode/di
 
+[![PHP Version](https://img.shields.io/badge/PHP-%3E%3D8.1-8892BF)](https://php.net/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![PSR-11](https://img.shields.io/badge/PSR-11-Compatible-blue)](https://www.php-fig.org/psr/psr-11/)
+
 高性能 PHP 8.1+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11。
 
 ## 特性
@@ -10,6 +14,7 @@
 - **协程安全** - 支持 Fiber/Swoole/Swow 上下文隔离
 - **高性能** - 反射缓存 + 定义缓存
 - **零全局状态** - 无全局变量污染
+- **框架无关** - 可在任何 PHP 8.1+ 项目中使用
 
 ## 安装
 
@@ -93,6 +98,31 @@ class DatabaseServiceProvider extends ServiceProvider
 }
 ```
 
+### 上下文绑定
+
+```php
+// 当 UserController 需要 LoggerInterface 时，使用专门的实现
+$container->when(UserController::class)
+    ->needs(LoggerInterface::class)
+    ->give(UserLogger::class);
+
+// 使用闭包
+$container->when(OrderController::class)
+    ->needs(LoggerInterface::class)
+    ->give(fn($c) => new OrderLogger('order.log'));
+```
+
+### 标签
+
+```php
+// 给服务打标签
+$container->singleton(CacheInterface::class, RedisCache::class)->tag('cache');
+$container->singleton(SessionInterface::class, RedisSession::class)->tag('cache');
+
+// 获取所有带标签的服务
+$cacheServices = $container->tagged('cache');
+```
+
 ## API 参考
 
 ### Container
@@ -111,7 +141,60 @@ class DatabaseServiceProvider extends ServiceProvider
 | `has(id)` | 检查服务是否存在 |
 | `make(id, parameters)` | 创建实例 |
 | `call(callback, parameters)` | 调用方法 |
+| `resolved(id)` | 检查是否已解析 |
+| `forget(id)` | 移除绑定 |
+| `flush()` | 清空容器 |
+
+### Attributes
+
+| 属性 | 目标 | 说明 |
+|------|------|------|
+| `#[Inject]` | Property, Parameter | 标记注入点 |
+| `#[Autowire]` | Class, Property, Method | 启用自动装配 |
+| `#[Singleton]` | Class | 标记为单例 |
+| `#[Prototype]` | Class | 标记为原型 |
+| `#[Contextual]` | Class | 标记为上下文隔离 |
+
+## 与其他 kode 组件集成
+
+```php
+use Kode\DI\Container;
+use Kode\Attributes\Attr;
+use Kode\Context\Context;
+
+// 自动使用 kode/attributes 进行属性读取
+// 可选使用 kode/context 进行协程上下文隔离
+```
+
+## 兼容性
+
+| PHP 版本 | 支持状态 |
+|----------|----------|
+| PHP 8.1 | ✅ 完全支持 |
+| PHP 8.2 | ✅ 完全支持 |
+| PHP 8.3 | ✅ 完全支持 |
+| PHP 8.4 | ✅ 完全支持 |
+| PHP 8.5 | ✅ 完全支持 |
+
+| 框架 | 兼容性 |
+|------|--------|
+| Laravel | ✅ 完全兼容 |
+| Symfony | ✅ 完全兼容 |
+| ThinkPHP 8 | ✅ 完全兼容 |
+| Webman | ✅ 完全兼容 |
+| Hyperf | ✅ 完全兼容 |
+| 原生 PHP | ✅ 完全兼容 |
+
+## 测试
+
+```bash
+composer test
+```
 
 ## 许可证
 
-Apache License 2.0
+[Apache License 2.0](LICENSE)
+
+## 作者
+
+KodePHP Team - 382601296@qq.com
