@@ -542,18 +542,45 @@ final class Container implements ContainerInterface
 
     private function createLazyProxy(string $id, Binding $binding): mixed
     {
-        return new class($this, $binding) {
+        if (PhpVersion::supportsLazyObjects()) {
+            return $this->createNativeLazyProxy($id, $binding);
+        }
+
+        return $this->createLegacyLazyProxy($binding);
+    }
+
+    private function createNativeLazyProxy(string $id, Binding $binding): mixed
+    {
+        $concrete = $binding->getConcrete();
+        $className = is_string($concrete) ? $concrete : \stdClass::class;
+
+        $reflector = $this->getReflector($className);
+
+        return $reflector->newLazyProxy(function () use ($binding) {
+            return $this->buildBinding($binding);
+        });
+    }
+
+    private function createLegacyLazyProxy(Binding $binding): mixed
+    {
+        $container = $this;
+        return new class($container, $binding) {
             private ?object $instance = null;
 
-            public function __construct(
-                private readonly Container $container,
-                private readonly Binding $binding
-            ) {}
+            private Container $container;
+
+            private Binding $binding;
+
+            public function __construct(Container $container, Binding $binding)
+            {
+                $this->container = $container;
+                $this->binding = $binding;
+            }
 
             public function __call(string $method, array $arguments): mixed
             {
                 if ($this->instance === null) {
-                    $this->instance = $this->container->buildBinding($this->binding);
+                    $this->instance = $this->container->buildBindingPublic($this->binding);
                 }
 
                 return $this->instance->$method(...$arguments);
@@ -562,7 +589,7 @@ final class Container implements ContainerInterface
             public function __get(string $name): mixed
             {
                 if ($this->instance === null) {
-                    $this->instance = $this->container->buildBinding($this->binding);
+                    $this->instance = $this->container->buildBindingPublic($this->binding);
                 }
 
                 return $this->instance->$name;
@@ -571,12 +598,17 @@ final class Container implements ContainerInterface
             public function __set(string $name, mixed $value): void
             {
                 if ($this->instance === null) {
-                    $this->instance = $this->container->buildBinding($this->binding);
+                    $this->instance = $this->container->buildBindingPublic($this->binding);
                 }
 
                 $this->instance->$name = $value;
             }
         };
+    }
+
+    public function buildBindingPublic(Binding $binding): mixed
+    {
+        return $this->buildBinding($binding);
     }
 
     private function isContextAvailable(): bool
