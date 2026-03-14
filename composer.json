@@ -4,7 +4,6 @@
     "description": "高性能 PHP 8.1+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11",
     "keywords": ["di", "ioc", "container", "dependency-injection", "psr-11", "attribute", "fiber", "coroutine", "kodephp"],
     "license": "Apache-2.0",
-    "version": "1.0.2",
     "authors": [
         {
             "name": "半本正经",
@@ -45,9 +44,15 @@
     },
     "extra": {
         "branch-alias": {
-            "dev-main": "1.0-dev"
+            "dev-main": "1.x-dev"
         }
     },
+    "support": {
+        "issues": "https://github.com/kodephp/di/issues",
+        "source": "https://github.com/kodephp/di",
+        "docs": "https://github.com/kodephp/di#readme"
+    },
+    "homepage": "https://github.com/kodephp/di",
     "minimum-stability": "stable",
     "prefer-stable": true
 }
