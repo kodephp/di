@@ -49,4 +49,16 @@ interface ContainerInterface extends PsrContainerInterface
     public function getBindings(): array;
 
     public function getAliases(): array;
+
+    public function resolve(string $id, array $parameters = []): mixed;
+
+    public function make(string $id, array $parameters = []): mixed;
+
+    public function call(callable $callback, array $parameters = []): mixed;
+
+    public function tag(string $tag, array $ids): void;
+
+    public function tagged(string $tag): array;
+
+    public function factory(string $id): Closure;
 }

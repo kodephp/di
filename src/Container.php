@@ -6,6 +6,7 @@ namespace Kode\DI;
 
 use Closure;
 use ReflectionClass;
+use ReflectionMethod;
 use ReflectionParameter;
 use ReflectionNamedType;
 use Kode\Attributes\Attr;
@@ -32,7 +33,13 @@ final class Container implements ContainerInterface
 
     private array $extenders = [];
 
+    private array $methodBindings = [];
+
     private static array $reflectionCache = [];
+
+    private static bool $contextAvailable = false;
+
+    private static bool $contextChecked = false;
 
     public function __construct()
     {
@@ -41,17 +48,9 @@ final class Container implements ContainerInterface
 
     private function registerSelf(): void
     {
-        $binding = new Binding(ContainerInterface::class);
-        $binding->setInstance($this);
-        $binding->setLifecycle(self::SINGLETON);
-        $this->bindings[ContainerInterface::class] = $binding;
-        $this->instances[ContainerInterface::class] = $this;
-
-        $bindingSelf = new Binding(self::class);
-        $bindingSelf->setInstance($this);
-        $bindingSelf->setLifecycle(self::SINGLETON);
-        $this->bindings[self::class] = $bindingSelf;
-        $this->instances[self::class] = $this;
+        $this->instance(ContainerInterface::class, $this);
+        $this->instance(self::class, $this);
+        $this->instance('container', $this);
     }
 
     public function bind(string $id, Closure|string|null $concrete = null, string $lifecycle = self::SINGLETON): Binding
@@ -137,8 +136,16 @@ final class Container implements ContainerInterface
     public function resolved(string $id): bool
     {
         $id = $this->resolveAlias($id);
-        return isset($this->instances[$id]) ||
-               (isset($this->bindings[$id]) && $this->bindings[$id]->isResolved());
+
+        if (isset($this->instances[$id])) {
+            return true;
+        }
+
+        if (isset($this->bindings[$id])) {
+            return $this->bindings[$id]->isResolved();
+        }
+
+        return false;
     }
 
     public function forget(string $id): void
@@ -155,6 +162,7 @@ final class Container implements ContainerInterface
         $this->contextual = [];
         $this->extenders = [];
         $this->resolving = [];
+        $this->methodBindings = [];
     }
 
     public function getBindings(): array
@@ -186,6 +194,14 @@ final class Container implements ContainerInterface
                 throw ServiceNotFoundException::create($id);
             }
             return $this->build($id, $parameters);
+        }
+
+        if ($binding->isContextual()) {
+            return $this->resolveContextual($id, $binding, $parameters);
+        }
+
+        if ($binding->isLazy()) {
+            return $this->createLazyProxy($id, $binding);
         }
 
         if ($binding->isSingleton() && $binding->isResolved()) {
@@ -221,6 +237,38 @@ final class Container implements ContainerInterface
         return $this->callMethod($callback, $parameters);
     }
 
+    public function bindMethod(string $method, Closure $callback): void
+    {
+        $this->methodBindings[$method] = $callback;
+    }
+
+    public function callMethodBinding(string $method, object $instance): mixed
+    {
+        if (isset($this->methodBindings[$method])) {
+            return $this->methodBindings[$method]($instance, $this);
+        }
+
+        return null;
+    }
+
+    public function rebinding(string $id, Closure $callback): void
+    {
+        $this->extend($id, function ($instance, $container) use ($callback) {
+            $callback($instance, $container);
+            return $instance;
+        });
+    }
+
+    public function resolving(string $id, Closure $callback): void
+    {
+        $this->extend($id, $callback);
+    }
+
+    public function afterResolving(string $id, Closure $callback): void
+    {
+        $this->extend($id, $callback);
+    }
+
     private function resolveAlias(string $id): string
     {
         while (isset($this->aliases[$id])) {
@@ -252,6 +300,8 @@ final class Container implements ContainerInterface
             throw ContainerException::notInstantiable($concrete);
         }
 
+        $this->detectLifecycleAttribute($concrete, $reflector);
+
         $constructor = $reflector->getConstructor();
 
         if ($constructor === null) {
@@ -267,6 +317,21 @@ final class Container implements ContainerInterface
 
         $instance = $reflector->newInstanceArgs($dependencies);
         return $this->injectProperties($instance, $reflector);
+    }
+
+    private function detectLifecycleAttribute(string $concrete, ReflectionClass $reflector): void
+    {
+        if (isset($this->bindings[$concrete])) {
+            return;
+        }
+
+        if (Attr::has($reflector, Singleton::class)) {
+            $this->singleton($concrete);
+        } elseif (Attr::has($reflector, Prototype::class)) {
+            $this->prototype($concrete);
+        } elseif (Attr::has($reflector, ContextualAttr::class)) {
+            $this->contextual($concrete);
+        }
     }
 
     private function resolveDependencies(
@@ -393,16 +458,17 @@ final class Container implements ContainerInterface
     {
         if (is_array($callback)) {
             [$class, $method] = $callback;
-            $reflection = new \ReflectionMethod($class, $method);
-            $dependencies = $this->resolveDependencies(
-                $reflection->getParameters(),
-                is_string($class) ? $class : get_class($class),
-                $parameters
-            );
 
             if (is_string($class)) {
                 $class = $this->resolve($class);
             }
+
+            $reflection = new ReflectionMethod($class, $method);
+            $dependencies = $this->resolveDependencies(
+                $reflection->getParameters(),
+                is_string($callback[0]) ? $callback[0] : get_class($class),
+                $parameters
+            );
 
             return $reflection->invokeArgs($class, $dependencies);
         }
@@ -455,6 +521,74 @@ final class Container implements ContainerInterface
         return $resolved;
     }
 
+    private function resolveContextual(string $id, Binding $binding, array $parameters): mixed
+    {
+        if ($this->isContextAvailable()) {
+            $contextClass = 'Kode\Context\Context';
+            $contextKey = 'di.contextual.' . $id;
+
+            if ($contextClass::has($contextKey)) {
+                return $contextClass::get($contextKey);
+            }
+
+            $instance = $this->buildBinding($binding, $parameters);
+            $contextClass::set($contextKey, $instance);
+
+            return $instance;
+        }
+
+        return $this->buildBinding($binding, $parameters);
+    }
+
+    private function createLazyProxy(string $id, Binding $binding): mixed
+    {
+        return new class($this, $binding) {
+            private ?object $instance = null;
+
+            public function __construct(
+                private readonly Container $container,
+                private readonly Binding $binding
+            ) {}
+
+            public function __call(string $method, array $arguments): mixed
+            {
+                if ($this->instance === null) {
+                    $this->instance = $this->container->buildBinding($this->binding);
+                }
+
+                return $this->instance->$method(...$arguments);
+            }
+
+            public function __get(string $name): mixed
+            {
+                if ($this->instance === null) {
+                    $this->instance = $this->container->buildBinding($this->binding);
+                }
+
+                return $this->instance->$name;
+            }
+
+            public function __set(string $name, mixed $value): void
+            {
+                if ($this->instance === null) {
+                    $this->instance = $this->container->buildBinding($this->binding);
+                }
+
+                $this->instance->$name = $value;
+            }
+        };
+    }
+
+    private function isContextAvailable(): bool
+    {
+        if (!self::$contextChecked) {
+            self::$contextAvailable = class_exists('Kode\Context\Context');
+            self::$contextChecked = true;
+        }
+
+        return self::$contextAvailable;
+    }
+
     private function getReflector(string $class): ReflectionClass
     {
         if (!isset(self::$reflectionCache[$class])) {
@@ -467,6 +601,8 @@ final class Container implements ContainerInterface
     public static function clearCache(): void
     {
         self::$reflectionCache = [];
+        self::$contextChecked = false;
+        self::$contextAvailable = false;
     }
 
     public function addContextualBinding(string $when, string $needs, string|Closure $give): void
@@ -496,5 +632,30 @@ final class Container implements ContainerInterface
         }
 
         return $resolved;
+    }
+
+    public function factory(string $id): Closure
+    {
+        return fn(array $parameters = []) => $this->make($id, $parameters);
+    }
+
+    public function environment(string|array $environments, Closure $callback): void
+    {
+        $environments = (array) $environments;
+
+        $env = $_ENV['APP_ENV'] ?? $_SERVER['APP_ENV'] ?? 'production';
+
+        if (in_array($env, $environments, true)) {
+            $callback($this);
+        }
+    }
+
+    public function if(string $condition, Closure $true, ?Closure $false = null): void
+    {
+        if ($condition) {
+            $true($this);
+        } elseif ($false !== null) {
+            $false($this);
+        }
     }
 }
