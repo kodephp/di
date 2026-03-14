@@ -4,7 +4,7 @@
     "description": "高性能 PHP 8.1+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11",
     "keywords": ["di", "ioc", "container", "dependency-injection", "psr-11", "attribute", "fiber", "coroutine", "kodephp"],
     "license": "Apache-2.0",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "authors": [
         {
             "name": "半本正经",
