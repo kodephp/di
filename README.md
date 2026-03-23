@@ -194,7 +194,3 @@ composer test
 ## 许可证
 
 [Apache License 2.0](LICENSE)
-
-## 作者
-
-KodePHP Team - 382601296@qq.com
