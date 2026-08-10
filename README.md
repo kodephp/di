@@ -25,6 +25,10 @@
 - **安全获取** - `getOr()` 在未绑定服务时返回默认值而非抛异常
 - **全局解析回调** - `resolving('*')` / `afterResolving('*')` 监听任意服务解析
 - **接口 / 抽象类自动定位** - 按命名约定（`Foo` / `FooImpl` / `AbstractFoo` → `Foo`）自动解析实现
+- **绑定内省与共享判定** - `getBinding()` 读取生命周期/标签/解析状态，`isShared()` 判定是否为共享服务
+- **批量解析与按标签重建** - `resolveMany()` 一次性解析多个服务；`refreshTag()` 按标签批量重建单例
+- **延迟调用包裹** - `wrap()` 预注入依赖并返回可延迟调用的闭包
+- **可调用类调用** - `call('Class')` 直接调用带 `__invoke` 的类（依赖由容器注入）
 
 ## 安装
 
@@ -166,6 +170,43 @@ $cacheServices = $container->tagged('cache');
 
 > 注意：`tag()` 仅对**已绑定**的 id 生效，传入未绑定的 id 会抛 `ContainerException`（不再静默忽略）。
 
+### 绑定内省与共享判定
+
+```php
+$binding = $container->getBinding(CacheInterface::class);
+$binding->isSingleton();   // 生命周期
+$binding->hasTag('cache'); // 标签
+$binding->isResolved();    // 是否已解析
+
+$container->isShared(CacheInterface::class); // true：单例/懒加载/上下文/实例型
+$container->isShared(LoggerInterface::class); // false：原型每次新建
+```
+
+### 批量解析与按标签重建
+
+```php
+// 一次性解析多个服务，结果以服务 id 为键
+$services = $container->resolveMany([DbInterface::class, CacheInterface::class]);
+
+// 按标签批量重建单例（丢弃实例缓存、不删绑定定义；受冻结守卫约束）
+$rebuilt = $container->refreshTag('cache');
+```
+
+### 延迟调用包裹
+
+`wrap()` 预绑定依赖并返回可延迟调用的闭包；调用时亦可传入覆盖参数（关联数组，按参数名优先）：
+
+```php
+$fn = $container->wrap(
+    fn (LoggerInterface $log, string $msg) => $log->info($msg),
+    ['msg' => 'hi']
+);
+// 此刻尚未执行
+$fn();                  // 依赖由容器解析，msg='hi'
+$fn(['msg' => 'bye']); // 调用时覆盖 msg='bye'
+```
+
+
 ### 方法绑定
 
 接管指定「类::方法」的调用逻辑，`call()` 会优先走绑定的闭包而不做反射注入。
@@ -182,6 +223,12 @@ $container->call([ReportService::class, 'generate']); // 走绑定闭包
 
 ```php
 $version = $container->call(Version::class . '::current'); // 静态方法，不实例化 Version
+```
+
+此外，`call()` 还接受字符串形式的**可调用类**（带 `__invoke` 的类），会解析其实例（依赖由容器注入）后调用 `__invoke`：
+
+```php
+$result = $container->call(ReportGenerator::class); // 等价于 $container->call([$container->get(ReportGenerator::class), '__invoke'])
 ```
 
 ### 幂等注册
@@ -338,10 +385,15 @@ $repo = $container->get(RepositoryInterface::class);
 | `has(id)` | 检查服务是否可解析（PSR-11；含可自动解析的类与延迟提供者） |
 | `make(id, parameters)` | 带参数创建实例 |
 | `resolve(id, parameters)` | 解析服务（`make` 的底层实现） |
-| `call(callback, parameters)` | 调用可调用对象并注入依赖 |
+| `call(callback, parameters)` | 调用可调用对象并注入依赖（支持 `Class::method` 静态方法与 `Class` 可调用类） |
+| `wrap(callback, parameters)` | 预注入依赖并返回可延迟调用的闭包（调用时可传覆盖参数） |
 | `factory(id)` | 返回每次调用都重新解析的工厂闭包 |
 | `getOr(id, default)` | 安全获取，未命中返回默认值 |
+| `resolveMany(ids)` | 批量解析多个服务，结果以服务 id 为键 |
 | `refresh(id)` | 强制重建单例（丢弃实例缓存，不删定义） |
+| `refreshTag(tag)` | 按标签批量重建单例（受冻结守卫约束） |
+| `getBinding(id)` | 获取绑定对象（内省生命周期 / 标签 / 解析状态），不存在返回 `null` |
+| `isShared(id)` | 是否为共享服务（单例 / 懒加载 / 上下文 / 实例型为 true，原型为 false） |
 | `\ArrayAccess` | 实现数组语法 `$c['id']` 读取 / 绑定 / 移除 |
 | `resolved(id)` | 检查是否已解析 |
 | `setAutoResolveImplementations(bool)` | 开启 / 关闭接口·抽象类按命名约定自动定位（默认开启） |

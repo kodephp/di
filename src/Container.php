@@ -423,6 +423,40 @@ final class Container implements ContainerInterface, \ArrayAccess
     }
 
     /**
+     * 获取指定 id 的绑定对象（内省用）
+     *
+     * 可通过返回的 {@see Binding} 读取生命周期、标签、是否已解析、是否为实例型绑定等。
+     */
+    #[\Override]
+    public function getBinding(string $id): ?Binding
+    {
+        return $this->bindings[$this->resolveAlias($id)] ?? null;
+    }
+
+    /**
+     * 判断指定 id 是否为共享服务
+     *
+     * 单例 / 懒加载 / 上下文隔离 / 实例型绑定均视为共享（解析返回同一实例）；
+     * 原型绑定每次新建，返回 false。未绑定则返回 false。
+     */
+    #[\Override]
+    public function isShared(string $id): bool
+    {
+        $id = $this->resolveAlias($id);
+
+        $binding = $this->bindings[$id] ?? null;
+
+        if ($binding === null) {
+            return false;
+        }
+
+        return $binding->isSingleton()
+            || $binding->isLazy()
+            || $binding->isContextual()
+            || $binding->isInstance();
+    }
+
+    /**
      * 解析服务
      *
      * @param string $id 服务标识
@@ -549,11 +583,13 @@ final class Container implements ContainerInterface, \ArrayAccess
     /**
      * 调用方法并自动注入依赖
      *
-     * @param callable|array{0: object|string, 1: string} $callback
+     * 支持闭包、数组可调用（[对象/类, 方法]）、静态方法字符串（'Class::method'）与可调用类字符串（'Class'，需带 __invoke）。
+     *
+     * @param callable|array{0: object|string, 1: string}|string $callback
      * @param array<string, mixed> $parameters
      */
     #[\Override]
-    public function call(callable|array $callback, array $parameters = []): mixed
+    public function call(callable|array|string $callback, array $parameters = []): mixed
     {
         return $this->callMethod($callback, $parameters);
     }
@@ -1064,10 +1100,10 @@ final class Container implements ContainerInterface, \ArrayAccess
     /**
      * 调用方法并注入依赖
      *
-     * @param callable|array{0: object|string, 1: string} $callback
+     * @param callable|array{0: object|string, 1: string}|string $callback
      * @param array<string, mixed> $parameters
      */
-    private function callMethod(callable|array $callback, array $parameters = []): mixed
+    private function callMethod(callable|array|string $callback, array $parameters = []): mixed
     {
         // 支持 'Class::method' 形式的静态方法字符串
         if (is_string($callback) && str_contains($callback, '::')) {
@@ -1120,6 +1156,17 @@ final class Container implements ContainerInterface, \ArrayAccess
             );
 
             return $reflection->invokeArgs($instance, $dependencies);
+        }
+
+        // 支持可调用类（'Class' 字符串指向带有 __invoke 的类）：
+        // 解析其实例（依赖由容器注入）后调用 __invoke，并复用方法依赖解析规则。
+        if (
+            is_string($callback)
+            && !str_contains($callback, '::')
+            && class_exists($callback)
+            && method_exists($callback, '__invoke')
+        ) {
+            return $this->call([$this->resolve($callback), '__invoke'], $parameters);
         }
 
         if ($callback instanceof Closure || is_string($callback)) {
@@ -1612,6 +1659,73 @@ final class Container implements ContainerInterface, \ArrayAccess
         }
 
         return $this->resolve($id);
+    }
+
+    /**
+     * 批量解析多个服务
+     *
+     * 结果以服务 id 为键返回，便于按需取用：
+     *
+     *     ['db' => $c->get('db'), 'cache' => $c->get('cache')]
+     *
+     * @param array<int, string> $ids 服务标识列表
+     * @return array<string, mixed> 以服务 id 为键的解析结果
+     */
+    #[\Override]
+    public function resolveMany(array $ids): array
+    {
+        $resolved = [];
+
+        foreach ($ids as $id) {
+            $resolved[$id] = $this->resolve($id);
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * 按标签批量重建单例
+     *
+     * 遍历所有打了该标签的绑定，逐一调用 {@see refresh()}（清除缓存后重新解析，不删定义）。
+     * 受冻结守卫约束：容器冻结时将对首个命中的标签服务抛 {@see \LogicException}。
+     *
+     * @return array<string, mixed> 以服务 id 为键的重建实例
+     */
+    #[\Override]
+    public function refreshTag(string $tag): array
+    {
+        $rebuilt = [];
+
+        foreach ($this->bindings as $id => $binding) {
+            if ($binding->hasTag($tag)) {
+                $rebuilt[$id] = $this->refresh($id);
+            }
+        }
+
+        return $rebuilt;
+    }
+
+    /**
+     * 包裹闭包并预注入依赖，返回可延迟调用的闭包
+     *
+     * 返回的闭包被调用时，会将预设的 {@see $parameters} 与调用时传入的覆盖参数（关联数组）合并后注入 $callback。
+     * 依赖优先由容器解析，预设/覆盖参数按参数名优先：
+     *
+     *     $fn = $c->wrap(fn (Logger $log, string $msg) => $log->info($msg), ['msg' => 'hi']);
+     *     $fn();                 // 依赖由容器解析，msg='hi'
+     *     $fn(['msg' => 'bye']); // 调用时覆盖 msg='bye'
+     *
+     * @param array<string, mixed> $parameters 预置参数
+     */
+    #[\Override]
+    public function wrap(Closure $callback, array $parameters = []): Closure
+    {
+        /**
+         * @param array<string, mixed> $override 调用时覆盖参数
+         */
+        return function (array $override = []) use ($callback, $parameters) {
+            return $this->call($callback, array_merge($parameters, $override));
+        };
     }
 
     /**
