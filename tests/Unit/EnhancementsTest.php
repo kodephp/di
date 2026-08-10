@@ -6,6 +6,7 @@ namespace Kode\DI\Tests\Unit;
 
 use Kode\DI\Attributes\Inject;
 use Kode\DI\Container;
+use Kode\DI\Exception\ContainerException;
 use Kode\DI\Exception\ServiceNotFoundException;
 use PHPUnit\Framework\TestCase;
 
@@ -342,6 +343,65 @@ class EnhancementsTest extends TestCase
         $this->container->refresh(EnhState::class);
         $this->assertSame(2, $count);
     }
+
+    // ---------------------------------------------------------------
+    // 监测修复回归
+    // ---------------------------------------------------------------
+
+    public function testInterfaceResolvingCallbacksFire(): void
+    {
+        // 接口自动定位到实现类时，注册在接口 id 上的回调也应触发（修复 B）
+        $this->container->setAutoResolveImplementations(true);
+
+        $firedInterface = false;
+        $firedImpl = false;
+        $this->container->afterResolving(EnhRepoInterface::class, static function () use (&$firedInterface): void {
+            $firedInterface = true;
+        });
+        $this->container->afterResolving(EnhRepo::class, static function () use (&$firedImpl): void {
+            $firedImpl = true;
+        });
+
+        $this->container->get(EnhRepoInterface::class);
+
+        $this->assertTrue($firedInterface, '接口 id 的 afterResolving 应触发');
+        $this->assertTrue($firedImpl);
+    }
+
+    public function testFrozenBlocksBindMethod(): void
+    {
+        // bindMethod 也应受 frozen 守卫（修复 F）
+        $this->container->freeze();
+
+        $this->expectException(\LogicException::class);
+        $this->container->bindMethod('Foo::bar', static fn() => null);
+    }
+
+    public function testGetOrReturnsDefaultForUnboundExistingClass(): void
+    {
+        // 未显式绑定的类视为「未命中」，getOr 返回默认值而非构建它（修复 A）
+        $this->assertFalse($this->container->bound(EnhState::class));
+        $this->assertSame('fallback', $this->container->getOr(EnhState::class, 'fallback'));
+    }
+
+    public function testTagThrowsOnUnboundId(): void
+    {
+        // 未绑定的 id 打标签应明确报错而非静默丢弃（修复 C）
+        $this->expectException(ContainerException::class);
+        $this->container->tag('mytag', [EnhState::class]);
+    }
+
+    public function testCallStringStaticMethod(): void
+    {
+        // call 支持 'Class::method' 静态方法字符串（修复 G）
+        $this->assertSame('1.0', $this->container->call(EnhUtil::class . '::version'));
+    }
+
+    public function testCallStaticMethodDoesNotInstantiateClass(): void
+    {
+        // 静态方法调用不应为实例化目标类而触发其依赖解析（EnhNeedsBound 构造依赖未绑定）
+        $this->assertSame('pong', $this->container->call(EnhNeedsBound::class . '::ping'));
+    }
 }
 
 // ---------------------------------------------------------------
@@ -392,5 +452,25 @@ class EnhCaller
     public function useSvc(#[Inject(EnhSvc::class)] EnhSvc $svc): EnhSvc
     {
         return $svc;
+    }
+}
+
+class EnhUtil
+{
+    public static function version(): string
+    {
+        return '1.0';
+    }
+}
+
+class EnhNeedsBound
+{
+    public function __construct(private EnhSvc $svc)
+    {
+    }
+
+    public static function ping(): string
+    {
+        return 'pong';
     }
 }

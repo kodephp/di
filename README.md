@@ -164,6 +164,8 @@ $container->singleton(SessionInterface::class, RedisSession::class)->tag('cache'
 $cacheServices = $container->tagged('cache');
 ```
 
+> 注意：`tag()` 仅对**已绑定**的 id 生效，传入未绑定的 id 会抛 `ContainerException`（不再静默忽略）。
+
 ### 方法绑定
 
 接管指定「类::方法」的调用逻辑，`call()` 会优先走绑定的闭包而不做反射注入。
@@ -174,6 +176,12 @@ $container->bindMethod(ReportService::class . '::generate', function (ReportServ
 });
 
 $container->call([ReportService::class, 'generate']); // 走绑定闭包
+```
+
+`call()` 也接受 `'Class::method'` 形式的字符串：若方法为静态方法，则无需实例化目标类即可调用。
+
+```php
+$version = $container->call(Version::class . '::current'); // 静态方法，不实例化 Version
 ```
 
 ### 幂等注册
@@ -258,6 +266,8 @@ $newInstance = $container->refresh(HeavyService::class);
 
 // 冻结容器：配置全部就绪后调用，禁止后续任何运行时增删 / 变更绑定。
 // 读取类方法（get/has/resolve/make/call/tagged 等）不受影响，适合生产环境防误改。
+// 受保护的操作包括 bind/instance/alias/extend/forget/flush/tag/refresh/
+// addContextualBinding/registerProvider/bindMethod 等。
 $container->freeze();
 $container->isFrozen(); // true
 ```
@@ -269,6 +279,9 @@ $container->isFrozen(); // true
 $config = $container->getOr('optional.config', []);
 ```
 
+> 说明：`getOr()` 以「是否已显式绑定 / 别名 / 实例」（`bound()`）判断命中，
+> 因此未注册但可自动解析的类会返回默认值，而非被悄悄构建。
+
 ### 全局解析回调
 
 `resolving` / `afterResolving` 支持通配键 `'*'`，在**任意**服务解析时触发
@@ -279,6 +292,8 @@ $container->resolving('*', function ($instance, $c) {
     // 对所有已解析服务统一做后置处理
 });
 ```
+
+> 说明：以接口 / 抽象类 id 注册的回调，在自动定位到具体实现后**同样会触发**（以原始接口 id 为粒度），无需改注册到实现类。
 
 ### 接口 / 抽象类自动定位
 
@@ -320,7 +335,7 @@ $repo = $container->get(RepositoryInterface::class);
 | 方法 | 说明 |
 |------|------|
 | `get(id)` | 获取服务（PSR-11） |
-| `has(id)` | 检查服务是否可解析（PSR-11） |
+| `has(id)` | 检查服务是否可解析（PSR-11；含可自动解析的类与延迟提供者） |
 | `make(id, parameters)` | 带参数创建实例 |
 | `resolve(id, parameters)` | 解析服务（`make` 的底层实现） |
 | `call(callback, parameters)` | 调用可调用对象并注入依赖 |

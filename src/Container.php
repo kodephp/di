@@ -455,7 +455,11 @@ final class Container implements ContainerInterface, \ArrayAccess
             if ($this->autoResolveImplementations) {
                 $impl = $this->resolveImplementationClass($id);
                 if ($impl !== null) {
-                    return $this->resolve($impl, $parameters);
+                    // 仍以原始 id（接口/抽象类）为粒度触发扩展器与解析回调，
+                    // 保证注册在接口 id 上的观察者/装饰器与解析出的实现类一致触发。
+                    $instance = $this->resolve($impl, $parameters);
+
+                    return $this->applyExtenders($id, $instance);
                 }
             }
 
@@ -559,6 +563,8 @@ final class Container implements ContainerInterface, \ArrayAccess
      */
     public function bindMethod(string $method, Closure $callback): void
     {
+        $this->assertNotFrozen("绑定方法：{$method}");
+
         $this->methodBindings[$this->normalizeMethodKey($method)] = $callback;
     }
 
@@ -1063,6 +1069,11 @@ final class Container implements ContainerInterface, \ArrayAccess
      */
     private function callMethod(callable|array $callback, array $parameters = []): mixed
     {
+        // 支持 'Class::method' 形式的静态方法字符串
+        if (is_string($callback) && str_contains($callback, '::')) {
+            $callback = explode('::', $callback, 2);
+        }
+
         if (is_array($callback)) {
             $target = $callback[0] ?? null;
             $method = $callback[1] ?? null;
@@ -1072,6 +1083,18 @@ final class Container implements ContainerInterface, \ArrayAccess
             }
 
             $declaredClass = is_string($target) ? $target : $target::class;
+            $reflection = new ReflectionMethod($declaredClass, $method);
+
+            // 静态方法：无需实例化目标类，直接以 null 为调用实例
+            if ($reflection->isStatic()) {
+                $dependencies = $this->resolveDependencies(
+                    $reflection->getParameters(),
+                    $declaredClass,
+                    $parameters
+                );
+
+                return $reflection->invokeArgs(null, $dependencies);
+            }
 
             $instance = is_string($target) ? $this->resolve($target) : $target;
 
@@ -1090,7 +1113,6 @@ final class Container implements ContainerInterface, \ArrayAccess
                 return $binding($instance, $this);
             }
 
-            $reflection = new ReflectionMethod($instance, $method);
             $dependencies = $this->resolveDependencies(
                 $reflection->getParameters(),
                 $declaredClass,
@@ -1403,9 +1425,11 @@ final class Container implements ContainerInterface, \ArrayAccess
         foreach ($ids as $id) {
             $id = $this->resolveAlias($id);
 
-            if (isset($this->bindings[$id])) {
-                $this->bindings[$id]->tag($tag);
+            if (!$this->bound($id)) {
+                throw new ContainerException("无法为未绑定的服务打标签：{$id}");
             }
+
+            $this->bindings[$id]->tag($tag);
         }
     }
 
@@ -1598,7 +1622,8 @@ final class Container implements ContainerInterface, \ArrayAccess
     #[\Override]
     public function getOr(string $id, mixed $default = null): mixed
     {
-        return $this->has($id) ? $this->resolve($id) : $default;
+        // 以「是否已显式绑定/别名/实例」判断命中，避免把「可自动解析但未注册」的类误判为命中而构建它。
+        return $this->bound($id) ? $this->resolve($id) : $default;
     }
 
     /**
