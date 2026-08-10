@@ -26,10 +26,13 @@ use Kode\DI\Exception\ServiceNotFoundException;
 /**
  * 依赖注入容器
  *
- * 高性能 PHP 8.1+ 依赖注入容器实现
+ * 高性能 PHP 8.3+ 依赖注入容器实现
  * 支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11
+ * 并实现 \ArrayAccess 以原生数组语法访问服务。
+ *
+ * @implements \ArrayAccess<mixed, mixed>
  */
-final class Container implements ContainerInterface
+final class Container implements ContainerInterface, \ArrayAccess
 {
     /** 闭包/函数依赖解析时使用的消费者上下文标识 */
     private const CLOSURE_CONTEXT = '{closure}';
@@ -79,6 +82,12 @@ final class Container implements ContainerInterface
     /** @var bool 是否已检查 context 可用性 */
     private static bool $contextChecked = false;
 
+    /** @var bool 是否已冻结（冻结后禁止运行时增删绑定） */
+    private bool $frozen = false;
+
+    /** @var bool 是否自动解析接口/抽象类的具体实现 */
+    private bool $autoResolveImplementations = true;
+
     /**
      * 构造函数
      */
@@ -98,6 +107,18 @@ final class Container implements ContainerInterface
     }
 
     /**
+     * 冻结态断言：容器冻结后禁止任何变更操作
+     *
+     * @throws \LogicException 若容器已冻结
+     */
+    private function assertNotFrozen(string $operation): void
+    {
+        if ($this->frozen) {
+            throw new \LogicException("容器已冻结，禁止{$operation}");
+        }
+    }
+
+    /**
      * 绑定服务到容器
      *
      * @param string $id 服务标识
@@ -108,6 +129,8 @@ final class Container implements ContainerInterface
     #[\Override]
     public function bind(string $id, Closure|string|null $concrete = null, string $lifecycle = self::SINGLETON): Binding
     {
+        $this->assertNotFrozen("绑定服务：{$id}");
+
         $concrete ??= $id;
 
         $binding = new Binding($id, $concrete);
@@ -211,6 +234,8 @@ final class Container implements ContainerInterface
     #[\Override]
     public function alias(string $alias, string $id): void
     {
+        $this->assertNotFrozen("设置别名：{$alias} -> {$id}");
+
         $this->aliases[$alias] = $id;
     }
 
@@ -221,6 +246,8 @@ final class Container implements ContainerInterface
     public function extend(string $id, Closure $callback): void
     {
         $id = $this->resolveAlias($id);
+        $this->assertNotFrozen("扩展服务：{$id}");
+
         $this->extenders[$id][] = $callback;
     }
 
@@ -273,6 +300,8 @@ final class Container implements ContainerInterface
     #[\Override]
     public function instance(string $id, object $instance): void
     {
+        $this->assertNotFrozen("注册实例：{$id}");
+
         $binding = new Binding($id);
         $binding->setInstance($instance);
         $binding->setLifecycle(self::SINGLETON);
@@ -331,6 +360,7 @@ final class Container implements ContainerInterface
     public function forget(string $id): void
     {
         $id = $this->resolveAlias($id);
+        $this->assertNotFrozen("移除绑定：{$id}");
 
         unset(
             $this->bindings[$id],
@@ -349,6 +379,8 @@ final class Container implements ContainerInterface
     #[\Override]
     public function flush(): void
     {
+        $this->assertNotFrozen('清空容器');
+
         $this->bindings = [];
         $this->aliases = [];
         $this->instances = [];
@@ -412,6 +444,15 @@ final class Container implements ContainerInterface
 
         // 没有绑定，尝试自动解析
         if ($binding === null) {
+            // 接口/抽象类自动定位具体实现（可通过 setAutoResolveImplementations 关闭）。
+            // 注意：抽象类 class_exists 为 true 但不可实例化，必须在此（非 !class_exists 内）尝试。
+            if ($this->autoResolveImplementations) {
+                $impl = $this->resolveImplementationClass($id);
+                if ($impl !== null) {
+                    return $this->resolve($impl, $parameters);
+                }
+            }
+
             if (!class_exists($id)) {
                 // 尝试通过延迟服务提供者加载（仅重入一次，防止提供者未真正绑定导致死循环）
                 if (
@@ -559,6 +600,8 @@ final class Container implements ContainerInterface
     #[\Override]
     public function registerProvider(ServiceProvider|string $provider): void
     {
+        $this->assertNotFrozen('注册服务提供者');
+
         $this->providers()->register($provider);
     }
 
@@ -797,6 +840,16 @@ final class Container implements ContainerInterface
 
             $typeName = $type->getName();
 
+            // 枚举不可实例化：仅当容器已显式实例/绑定该枚举时解析，
+            // 否则交还上层走默认值/null 回退，避免尝试 new 枚举而失败。
+            if (enum_exists($typeName)) {
+                if (isset($this->instances[$typeName]) || isset($this->bindings[$typeName])) {
+                    return ['resolved' => true, 'value' => $this->resolve($typeName)];
+                }
+
+                return ['resolved' => false, 'value' => null];
+            }
+
             // 上下文绑定
             $contextualImpl = $this->contextual[$class][$typeName] ?? null;
             if ($contextualImpl !== null) {
@@ -963,12 +1016,17 @@ final class Container implements ContainerInterface
             }
         }
 
-        foreach ($this->resolvingCallbacks[$id] ?? [] as $callback) {
-            $callback($instance, $this);
+        // 先触发指定 id 的回调，再触发全局 '*' 通配回调（观察者语义，返回值忽略）
+        foreach ([$id, '*'] as $key) {
+            foreach ($this->resolvingCallbacks[$key] ?? [] as $callback) {
+                $callback($instance, $this);
+            }
         }
 
-        foreach ($this->afterResolvingCallbacks[$id] ?? [] as $callback) {
-            $callback($instance, $this);
+        foreach ([$id, '*'] as $key) {
+            foreach ($this->afterResolvingCallbacks[$key] ?? [] as $callback) {
+                $callback($instance, $this);
+            }
         }
 
         return $instance;
@@ -1306,6 +1364,8 @@ final class Container implements ContainerInterface
      */
     public function addContextualBinding(string $when, string $needs, string|Closure $give): void
     {
+        $this->assertNotFrozen("上下文绑定：{$when} -> {$needs}");
+
         $this->contextual[$when][$needs] = $give;
     }
 
@@ -1315,6 +1375,8 @@ final class Container implements ContainerInterface
     #[\Override]
     public function tag(string $tag, array $ids): void
     {
+        $this->assertNotFrozen('打标签');
+
         foreach ($ids as $id) {
             $id = $this->resolveAlias($id);
 
@@ -1424,5 +1486,153 @@ final class Container implements ContainerInterface
         }
 
         return array_slice($suggestions, 0, 3);
+    }
+
+    /**
+     * 为接口/抽象类推测具体实现类名（按命名约定）
+     *
+     * 候选顺序：去 Interface 后缀、去 Abstract 前缀、加 Impl、加 Default、加 Factory。
+     * 命中可实例化类即返回，找不到返回 null。
+     *
+     * @return string|null 命中则返回类名，否则 null
+     */
+    private function resolveImplementationClass(string $id): ?string
+    {
+        $isAbstractTarget = interface_exists($id)
+            || (class_exists($id) && $this->getReflector($id)->isAbstract());
+
+        if (!$isAbstractTarget) {
+            return null;
+        }
+
+        // 命名约定仅作用于「短类名」，需保留命名空间前缀（避免误改全限定名开头）
+        $pos = strrpos($id, '\\');
+        $namespace = $pos !== false ? (string) substr($id, 0, $pos + 1) : '';
+        $short = $pos !== false ? (string) substr($id, $pos + 1) : $id;
+
+        $base = (string) preg_replace('/Interface$/', '', $short);
+        $base = (string) preg_replace('/^Abstract/', '', $base);
+
+        $candidates = array_unique([
+            $namespace . $base,
+            $namespace . $base . 'Impl',
+            $namespace . $base . 'Default',
+            $namespace . $base . 'Factory',
+        ]);
+
+        foreach ($candidates as $candidate) {
+            if ($candidate !== $id && class_exists($candidate)) {
+                $reflector = $this->getReflector($candidate);
+                if ($reflector->isInstantiable()) {
+                    return $candidate;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * 强制重建单例（清除实例缓存后重新解析）
+     *
+     * 不会删除绑定定义，仅丢弃已解析/实例缓存，下次解析将重新构建。
+     *
+     * @throws \LogicException 若容器已冻结
+     */
+    #[\Override]
+    public function refresh(string $id): mixed
+    {
+        $this->assertNotFrozen("重建服务：{$id}");
+
+        $id = $this->resolveAlias($id);
+
+        unset($this->instances[$id]);
+
+        if (isset($this->bindings[$id])) {
+            $this->bindings[$id]->reset();
+        }
+
+        return $this->resolve($id);
+    }
+
+    /**
+     * 安全获取服务，未命中时返回默认值（不抛异常）
+     *
+     * 与 PSR-11 的 get() 不同，本方法在服务未绑定时返回默认值而非抛错。
+     */
+    #[\Override]
+    public function getOr(string $id, mixed $default = null): mixed
+    {
+        return $this->has($id) ? $this->resolve($id) : $default;
+    }
+
+    /**
+     * 冻结容器，禁止后续任何运行时增删/变更绑定
+     *
+     * 适用于生产环境：配置全部就绪后调用，防止运行时被意外修改。
+     * 读取类方法（get/has/resolve/make/call/tagged 等）不受影响。
+     */
+    #[\Override]
+    public function freeze(): void
+    {
+        $this->frozen = true;
+    }
+
+    /**
+     * 容器是否已冻结
+     */
+    #[\Override]
+    public function isFrozen(): bool
+    {
+        return $this->frozen;
+    }
+
+    /**
+     * 设置是否自动解析接口/抽象类的具体实现
+     *
+     * @param bool $enabled 默认 true
+     */
+    #[\Override]
+    public function setAutoResolveImplementations(bool $enabled): void
+    {
+        $this->autoResolveImplementations = $enabled;
+    }
+
+    #[\Override]
+    public function offsetExists(mixed $offset): bool
+    {
+        return $this->has((string) $offset);
+    }
+
+    #[\Override]
+    public function offsetGet(mixed $offset): mixed
+    {
+        return $this->resolve((string) $offset);
+    }
+
+    #[\Override]
+    public function offsetSet(mixed $offset, mixed $value): void
+    {
+        $id = (string) $offset;
+
+        // 闭包作为工厂绑定；其余对象作为实例注册。
+        // 注意：闭包也是对象，$value instanceof Closure 必须早于 is_object 检查。
+        if ($value instanceof Closure) {
+            $this->bind($id, $value);
+            return;
+        }
+
+        if (is_object($value)) {
+            $this->instance($id, $value);
+            return;
+        }
+
+        $this->bind($id, is_string($value) ? $value : null);
+    }
+
+    #[\Override]
+    public function offsetUnset(mixed $offset): void
+    {
+        $this->forget((string) $offset);
     }
 }

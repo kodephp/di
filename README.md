@@ -20,6 +20,11 @@
 - **零全局状态** - 无全局变量污染
 - **静态分析友好** - PHPStan `level=max` 零告警
 - **框架无关** - 可在任何 PHP 8.3+ 项目中使用
+- **数组语法访问** - 实现 `\ArrayAccess`，可用 `$c['id']` 读取 / 绑定 / 移除服务
+- **强制重建与冻结** - `refresh()` 重建单例；`freeze()` 锁定容器防止运行时被改
+- **安全获取** - `getOr()` 在未绑定服务时返回默认值而非抛异常
+- **全局解析回调** - `resolving('*')` / `afterResolving('*')` 监听任意服务解析
+- **接口 / 抽象类自动定位** - 按命名约定（`Foo` / `FooImpl` / `AbstractFoo` → `Foo`）自动解析实现
 
 ## 安装
 
@@ -224,6 +229,69 @@ $r1 = $factory();
 $r2 = $factory(); // 每次调用重新解析
 ```
 
+### 数组语法访问
+
+容器实现 `\ArrayAccess`，可用原生数组语法操作服务：
+
+```php
+// 读取（等价于 $container->resolve($id)）
+$logger = $container['logger'];
+
+// 写入：对象 → 实例绑定；闭包 → 工厂绑定；字符串 → 具体类名
+$container['logger']  = new FileLogger();
+$container['request'] = fn() => new Request();
+$container['cache']   = RedisCache::class;
+
+// 判断与移除
+isset($container['logger']);
+unset($container['logger']);
+```
+
+### 强制重建与冻结
+
+```php
+// 强制重建单例：丢弃实例缓存，下次解析重新构建，但不删除绑定定义
+$newInstance = $container->refresh(HeavyService::class);
+
+// 冻结容器：配置全部就绪后调用，禁止后续任何运行时增删 / 变更绑定。
+// 读取类方法（get/has/resolve/make/call/tagged 等）不受影响，适合生产环境防误改。
+$container->freeze();
+$container->isFrozen(); // true
+```
+
+### 安全获取
+
+```php
+// 服务未绑定时返回默认值，不会抛 ServiceNotFoundException
+$config = $container->getOr('optional.config', []);
+```
+
+### 全局解析回调
+
+`resolving` / `afterResolving` 支持通配键 `'*'`，在**任意**服务解析时触发
+（先触发指定 id 的回调，再触发全局 `'*'` 回调）：
+
+```php
+$container->resolving('*', function ($instance, $c) {
+    // 对所有已解析服务统一做后置处理
+});
+```
+
+### 接口 / 抽象类自动定位
+
+未显式绑定接口或抽象类时，按命名约定自动定位具体实现
+（可通过 `setAutoResolveImplementations(false)` 关闭，默认开启）：
+
+| 抽象 / 接口 | 候选实现（按优先级） |
+|-------------|----------------------|
+| `FooInterface` | `Foo` → `FooImpl` → `FooDefault` → `FooFactory` |
+| `AbstractFoo` | `Foo` → `FooImpl` → `FooDefault` → `FooFactory` |
+
+```php
+// 未绑定 RepositoryInterface，但存在 Repository 类时自动解析
+$repo = $container->get(RepositoryInterface::class);
+```
+
 ## API 参考
 
 ### Container
@@ -254,7 +322,11 @@ $r2 = $factory(); // 每次调用重新解析
 | `resolve(id, parameters)` | 解析服务（`make` 的底层实现） |
 | `call(callback, parameters)` | 调用可调用对象并注入依赖 |
 | `factory(id)` | 返回每次调用都重新解析的工厂闭包 |
+| `getOr(id, default)` | 安全获取，未命中返回默认值 |
+| `refresh(id)` | 强制重建单例（丢弃实例缓存，不删定义） |
+| `\ArrayAccess` | 实现数组语法 `$c['id']` 读取 / 绑定 / 移除 |
 | `resolved(id)` | 检查是否已解析 |
+| `setAutoResolveImplementations(bool)` | 开启 / 关闭接口·抽象类按命名约定自动定位（默认开启） |
 
 **上下文与扩展**
 
@@ -280,6 +352,7 @@ $r2 = $factory(); // 每次调用重新解析
 | `if(bool\|Closure, true, false?)` | 按条件注册，条件支持闭包延迟求值 |
 | `forget(id)` | 移除绑定及其实例 / 扩展器 / 上下文 |
 | `flush()` | 清空容器 |
+| `freeze()` / `isFrozen()` | 冻结容器 / 查询是否冻结（冻结后禁止运行时增删·变更绑定） |
 | `Container::clearCache()` | 清空全局反射缓存 |
 
 ### Attributes

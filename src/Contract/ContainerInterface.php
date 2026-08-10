@@ -101,4 +101,34 @@ interface ContainerInterface extends PsrContainerInterface
     public function tagged(string $tag): array;
 
     public function factory(string $id): Closure;
+
+    /**
+     * 强制重建单例（清除实例缓存后重新解析，不删除绑定定义）
+     *
+     * @return mixed 重建后的实例
+     */
+    public function refresh(string $id): mixed;
+
+    /**
+     * 安全获取服务，未命中时返回默认值（不抛异常）
+     *
+     * @param mixed $default 未命中时的返回值
+     * @return mixed 解析结果或默认值
+     */
+    public function getOr(string $id, mixed $default = null): mixed;
+
+    /**
+     * 冻结容器，禁止后续运行时增删/变更绑定
+     */
+    public function freeze(): void;
+
+    /**
+     * 容器是否已冻结
+     */
+    public function isFrozen(): bool;
+
+    /**
+     * 设置是否自动解析接口/抽象类的具体实现
+     */
+    public function setAutoResolveImplementations(bool $enabled): void;
 }

@@ -112,9 +112,20 @@ final class FeaturesTest extends TestCase
 
     public function testNullableUnionResolvesToNullWhenUnbound(): void
     {
+        // 关闭接口自动定位后，未显式绑定的可空接口应回退为 null
+        $this->container->setAutoResolveImplementations(false);
+
         $consumer = $this->container->get(NullableConsumer::class);
 
         $this->assertNull($consumer->foo);
+    }
+
+    public function testNullableUnionResolvesToImplementationWhenAutoResolveEnabled(): void
+    {
+        // 默认开启接口自动定位：UnionFoo 未显式绑定，但存在命名约定的实现 UnionFooImpl
+        $consumer = $this->container->get(NullableConsumer::class);
+
+        $this->assertInstanceOf(UnionFooImpl::class, $consumer->foo);
     }
 
     // ---- bindMethod 集成 ----

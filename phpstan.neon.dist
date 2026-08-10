@@ -1,0 +1,4 @@
+parameters:
+    # 实现内置接口（如 \ArrayAccess）的方法必然接收显式 mixed 参数，
+    # 这里是有意使用而非遗漏，关闭该检查以保持 level=max 的其余严格性。
+    checkExplicitMixed: false
