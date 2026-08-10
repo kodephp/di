@@ -7,8 +7,12 @@ namespace Kode\DI;
 use Closure;
 use ReflectionClass;
 use ReflectionMethod;
+use ReflectionFunction;
 use ReflectionParameter;
 use ReflectionNamedType;
+use ReflectionUnionType;
+use ReflectionIntersectionType;
+use ReflectionType;
 use Kode\Attributes\Attr;
 use Kode\DI\Attributes\Inject;
 use Kode\DI\Attributes\Autowire;
@@ -21,19 +25,22 @@ use Kode\DI\Exception\ServiceNotFoundException;
 
 /**
  * 依赖注入容器
- * 
+ *
  * 高性能 PHP 8.1+ 依赖注入容器实现
- * 支持属性注入、生命周期管理、协程上下文隔离
+ * 支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11
  */
 final class Container implements ContainerInterface
 {
+    /** 闭包/函数依赖解析时使用的消费者上下文标识 */
+    private const CLOSURE_CONTEXT = '{closure}';
+
     /** @var array<string, Binding> 服务绑定 */
     private array $bindings = [];
 
     /** @var array<string, string> 服务别名 */
     private array $aliases = [];
 
-    /** @var array<string, object> 已解析的单例实例 */
+    /** @var array<string, mixed> 已解析的实例（单例 / 懒加载代理 / 实例绑定 / 标量单例） */
     private array $instances = [];
 
     /** @var array<string, true> 正在解析的服务（用于循环依赖检测） */
@@ -42,13 +49,28 @@ final class Container implements ContainerInterface
     /** @var array<string, array<string, string|Closure>> 上下文绑定 */
     private array $contextual = [];
 
-    /** @var array<string, Closure[]> 服务扩展器 */
+    /** @var array<string, Closure[]> 服务扩展器（可替换实例） */
     private array $extenders = [];
+
+    /** @var array<string, Closure[]> 解析回调（观察者，不改变实例） */
+    private array $resolvingCallbacks = [];
+
+    /** @var array<string, Closure[]> 解析后回调（观察者，不改变实例） */
+    private array $afterResolvingCallbacks = [];
+
+    /** @var array<string, true> 已尝试过延迟提供者加载的标识（防止重入死循环） */
+    private array $deferredAttempted = [];
 
     /** @var array<string, Closure> 方法绑定 */
     private array $methodBindings = [];
 
-    /** @var array<string, ReflectionClass> 反射缓存 */
+    /** @var ServiceProviderRegistry|null 服务提供者注册表 */
+    private ?ServiceProviderRegistry $providerRegistry = null;
+
+    /** @var Definition|null 上下文中待完成的上下文绑定构造器 */
+    private ?Definition $contextualBuilder = null;
+
+    /** @var array<string, ReflectionClass<object>> 反射缓存（按类名共享，跨容器安全） */
     private static array $reflectionCache = [];
 
     /** @var bool kode/context 是否可用 */
@@ -83,6 +105,7 @@ final class Container implements ContainerInterface
      * @param string $lifecycle 生命周期类型
      * @return Binding 绑定对象
      */
+    #[\Override]
     public function bind(string $id, Closure|string|null $concrete = null, string $lifecycle = self::SINGLETON): Binding
     {
         $concrete ??= $id;
@@ -99,6 +122,7 @@ final class Container implements ContainerInterface
     /**
      * 绑定单例服务
      */
+    #[\Override]
     public function singleton(string $id, Closure|string|null $concrete = null): Binding
     {
         return $this->bind($id, $concrete, self::SINGLETON);
@@ -107,6 +131,7 @@ final class Container implements ContainerInterface
     /**
      * 绑定原型服务（每次获取创建新实例）
      */
+    #[\Override]
     public function prototype(string $id, Closure|string|null $concrete = null): Binding
     {
         return $this->bind($id, $concrete, self::PROTOTYPE);
@@ -115,6 +140,7 @@ final class Container implements ContainerInterface
     /**
      * 绑定懒加载服务
      */
+    #[\Override]
     public function lazy(string $id, Closure|string|null $concrete = null): Binding
     {
         return $this->bind($id, $concrete, self::LAZY);
@@ -123,14 +149,66 @@ final class Container implements ContainerInterface
     /**
      * 绑定上下文隔离服务（协程/Fiber间隔离）
      */
+    #[\Override]
     public function contextual(string $id, Closure|string|null $concrete = null): Binding
     {
         return $this->bind($id, $concrete, self::CONTEXTUAL);
     }
 
     /**
+     * 仅在服务尚未绑定时绑定（幂等注册，避免重复绑定报错）
+     *
+     * @return Binding 既有或新建的绑定
+     */
+    #[\Override]
+    public function bindIf(string $id, Closure|string|null $concrete = null, string $lifecycle = self::SINGLETON): Binding
+    {
+        $resolved = $this->resolveAlias($id);
+
+        if (isset($this->bindings[$resolved])) {
+            return $this->bindings[$resolved];
+        }
+
+        return $this->bind($id, $concrete, $lifecycle);
+    }
+
+    /**
+     * 幂等单例绑定
+     */
+    #[\Override]
+    public function singletonIf(string $id, Closure|string|null $concrete = null): Binding
+    {
+        return $this->bindIf($id, $concrete, self::SINGLETON);
+    }
+
+    /**
+     * 幂等实例绑定
+     */
+    #[\Override]
+    public function instanceIf(string $id, object $instance): void
+    {
+        $resolved = $this->resolveAlias($id);
+
+        if (isset($this->bindings[$resolved])) {
+            return;
+        }
+
+        $this->instance($id, $instance);
+    }
+
+    /**
+     * 检查服务是否已绑定（含别名解析）
+     */
+    #[\Override]
+    public function bound(string $id): bool
+    {
+        return isset($this->bindings[$this->resolveAlias($id)]);
+    }
+
+    /**
      * 设置服务别名
      */
+    #[\Override]
     public function alias(string $alias, string $id): void
     {
         $this->aliases[$alias] = $id;
@@ -139,6 +217,7 @@ final class Container implements ContainerInterface
     /**
      * 扩展服务（在服务解析后执行回调）
      */
+    #[\Override]
     public function extend(string $id, Closure $callback): void
     {
         $id = $this->resolveAlias($id);
@@ -148,30 +227,50 @@ final class Container implements ContainerInterface
     /**
      * 开始上下文绑定
      */
+    #[\Override]
     public function when(string $when): Definition
     {
-        return new Definition($when);
+        $this->contextualBuilder = new Definition($when, $this);
+
+        return $this->contextualBuilder;
     }
 
     /**
-     * 指定需要的依赖
+     * 指定需要的依赖（上下文绑定链式调用）
+     *
+     * @throws \LogicException 若未先调用 when()
      */
+    #[\Override]
     public function needs(string $needs): Definition
     {
-        throw new \LogicException('必须先调用 when() 方法');
+        if ($this->contextualBuilder === null) {
+            throw new \LogicException('必须先调用 when() 方法');
+        }
+
+        return $this->contextualBuilder->needs($needs);
     }
 
     /**
-     * 指定实现
+     * 指定实现（上下文绑定链式调用）
+     *
+     * @throws \LogicException 若未先调用 when() 和 needs()
      */
+    #[\Override]
     public function give(string|Closure $implementation): void
     {
-        throw new \LogicException('必须先调用 when() 和 needs() 方法');
+        if ($this->contextualBuilder === null) {
+            throw new \LogicException('必须先调用 when() 和 needs() 方法');
+        }
+
+        $builder = $this->contextualBuilder;
+        $this->contextualBuilder = null;
+        $builder->give($implementation);
     }
 
     /**
      * 注册已存在的实例
      */
+    #[\Override]
     public function instance(string $id, object $instance): void
     {
         $binding = new Binding($id);
@@ -185,6 +284,7 @@ final class Container implements ContainerInterface
     /**
      * 获取服务（PSR-11）
      */
+    #[\Override]
     public function get(string $id): mixed
     {
         return $this->resolve($id);
@@ -193,15 +293,22 @@ final class Container implements ContainerInterface
     /**
      * 检查服务是否存在（PSR-11）
      */
+    #[\Override]
     public function has(string $id): bool
     {
         $id = $this->resolveAlias($id);
-        return isset($this->bindings[$id]) || class_exists($id);
+
+        if (isset($this->bindings[$id]) || class_exists($id)) {
+            return true;
+        }
+
+        return $this->providerRegistry !== null && $this->providerRegistry->hasDeferred($id);
     }
 
     /**
      * 检查服务是否已解析
      */
+    #[\Override]
     public function resolved(string $id): bool
     {
         $id = $this->resolveAlias($id);
@@ -220,15 +327,26 @@ final class Container implements ContainerInterface
     /**
      * 移除服务绑定
      */
+    #[\Override]
     public function forget(string $id): void
     {
         $id = $this->resolveAlias($id);
-        unset($this->bindings[$id], $this->instances[$id]);
+
+        unset(
+            $this->bindings[$id],
+            $this->instances[$id],
+            $this->extenders[$id],
+            $this->resolvingCallbacks[$id],
+            $this->afterResolvingCallbacks[$id],
+            $this->methodBindings[$id],
+            $this->contextual[$id]
+        );
     }
 
     /**
      * 清空容器
      */
+    #[\Override]
     public function flush(): void
     {
         $this->bindings = [];
@@ -236,13 +354,20 @@ final class Container implements ContainerInterface
         $this->instances = [];
         $this->contextual = [];
         $this->extenders = [];
+        $this->resolvingCallbacks = [];
+        $this->afterResolvingCallbacks = [];
         $this->resolving = [];
         $this->methodBindings = [];
+        $this->providerRegistry = null;
+        $this->contextualBuilder = null;
     }
 
     /**
      * 获取所有绑定标识
+     *
+     * @return array<int, string>
      */
+    #[\Override]
     public function getBindings(): array
     {
         return array_keys($this->bindings);
@@ -250,7 +375,10 @@ final class Container implements ContainerInterface
 
     /**
      * 获取所有别名
+     *
+     * @return array<string, string>
      */
+    #[\Override]
     public function getAliases(): array
     {
         return $this->aliases;
@@ -260,11 +388,12 @@ final class Container implements ContainerInterface
      * 解析服务
      *
      * @param string $id 服务标识
-     * @param array $parameters 构造参数
+     * @param array<string, mixed> $parameters 构造参数
      * @return mixed 服务实例
      * @throws ContainerException 循环依赖异常
      * @throws ServiceNotFoundException 服务未找到异常
      */
+    #[\Override]
     public function resolve(string $id, array $parameters = []): mixed
     {
         $id = $this->resolveAlias($id);
@@ -274,7 +403,7 @@ final class Container implements ContainerInterface
             throw ContainerException::circularReference($id, array_keys($this->resolving));
         }
 
-        // 返回已缓存的实例
+        // 返回已缓存的实例（单例 / 懒加载代理 / 实例绑定）
         if (isset($this->instances[$id])) {
             return $this->instances[$id];
         }
@@ -284,9 +413,38 @@ final class Container implements ContainerInterface
         // 没有绑定，尝试自动解析
         if ($binding === null) {
             if (!class_exists($id)) {
-                throw ServiceNotFoundException::create($id);
+                // 尝试通过延迟服务提供者加载（仅重入一次，防止提供者未真正绑定导致死循环）
+                if (
+                    $this->providerRegistry !== null
+                    && !isset($this->deferredAttempted[$id])
+                    && $this->providerRegistry->resolveDeferred($id)
+                ) {
+                    $this->deferredAttempted[$id] = true;
+
+                    try {
+                        return $this->resolve($id, $parameters);
+                    } finally {
+                        unset($this->deferredAttempted[$id]);
+                    }
+                }
+
+                throw ServiceNotFoundException::withSuggestions($id, $this->suggestId($id));
             }
-            return $this->build($id, $parameters);
+
+            // 检测类上的生命周期属性，命中后重新进入解析以享受缓存
+            if ($this->detectLifecycleAttribute($id)) {
+                return $this->resolve($id, $parameters);
+            }
+
+            // 自动解析同样需要循环依赖守卫，否则未绑定类互相依赖会无限递归
+            $this->resolving[$id] = true;
+
+            try {
+                // 自动解析的实例同样要经过扩展器与解析回调，保证行为一致
+                return $this->applyExtenders($id, $this->build($id, $parameters));
+            } finally {
+                unset($this->resolving[$id]);
+            }
         }
 
         // 上下文隔离服务
@@ -294,9 +452,12 @@ final class Container implements ContainerInterface
             return $this->resolveContextual($id, $binding, $parameters);
         }
 
-        // 懒加载服务
+        // 懒加载服务（代理只创建一次）
         if ($binding->isLazy()) {
-            return $this->createLazyProxy($id, $binding);
+            $proxy = $this->createLazyProxy($id, $binding);
+            $this->instances[$id] = $proxy;
+
+            return $proxy;
         }
 
         // 单例且已解析
@@ -325,7 +486,10 @@ final class Container implements ContainerInterface
 
     /**
      * 创建服务实例
+     *
+     * @param array<string, mixed> $parameters
      */
+    #[\Override]
     public function make(string $id, array $parameters = []): mixed
     {
         return $this->resolve($id, $parameters);
@@ -333,18 +497,22 @@ final class Container implements ContainerInterface
 
     /**
      * 调用方法并自动注入依赖
+     *
+     * @param callable|array{0: object|string, 1: string} $callback
+     * @param array<string, mixed> $parameters
      */
-    public function call(callable $callback, array $parameters = []): mixed
+    #[\Override]
+    public function call(callable|array $callback, array $parameters = []): mixed
     {
         return $this->callMethod($callback, $parameters);
     }
 
     /**
-     * 绑定方法
+     * 绑定方法（在 call() 调用指定类方法时优先使用绑定闭包）
      */
     public function bindMethod(string $method, Closure $callback): void
     {
-        $this->methodBindings[$method] = $callback;
+        $this->methodBindings[$this->normalizeMethodKey($method)] = $callback;
     }
 
     /**
@@ -352,38 +520,68 @@ final class Container implements ContainerInterface
      */
     public function callMethodBinding(string $method, object $instance): mixed
     {
-        if (isset($this->methodBindings[$method])) {
-            return $this->methodBindings[$method]($instance, $this);
+        $key = $this->normalizeMethodKey($method);
+
+        if (isset($this->methodBindings[$key])) {
+            return $this->methodBindings[$key]($instance, $this);
         }
 
         return null;
     }
 
     /**
-     * 重新绑定时执行回调
+     * 重新绑定时执行回调（观察者语义，不改变实例）
      */
     public function rebinding(string $id, Closure $callback): void
     {
-        $this->extend($id, function ($instance, $container) use ($callback) {
-            $callback($instance, $container);
-            return $instance;
-        });
+        $this->resolving($id, $callback);
     }
 
     /**
-     * 解析时执行回调
+     * 解析时执行回调（观察者语义，回调返回值被忽略）
      */
     public function resolving(string $id, Closure $callback): void
     {
-        $this->extend($id, $callback);
+        $this->resolvingCallbacks[$this->resolveAlias($id)][] = $callback;
     }
 
     /**
-     * 解析后执行回调
+     * 解析后执行回调（在所有 resolving 回调之后触发）
      */
     public function afterResolving(string $id, Closure $callback): void
     {
-        $this->extend($id, $callback);
+        $this->afterResolvingCallbacks[$this->resolveAlias($id)][] = $callback;
+    }
+
+    /**
+     * 注册服务提供者（类字符串或实例）
+     */
+    #[\Override]
+    public function registerProvider(ServiceProvider|string $provider): void
+    {
+        $this->providers()->register($provider);
+    }
+
+    /**
+     * 批量注册服务提供者
+     *
+     * @param array<ServiceProvider|string> $providers
+     */
+    #[\Override]
+    public function registerProviders(array $providers): void
+    {
+        foreach ($providers as $provider) {
+            $this->registerProvider($provider);
+        }
+    }
+
+    /**
+     * 启动所有已注册（非延迟）服务提供者
+     */
+    #[\Override]
+    public function bootProviders(): void
+    {
+        $this->providerRegistry?->boot();
     }
 
     /**
@@ -399,6 +597,9 @@ final class Container implements ContainerInterface
 
     /**
      * 构建绑定实例
+     */
+    /**
+     * @param array<string, mixed> $parameters
      */
     private function buildBinding(Binding $binding, array $parameters = []): mixed
     {
@@ -417,17 +618,20 @@ final class Container implements ContainerInterface
 
     /**
      * 构建类实例
+     *
+     * @param array<string, mixed> $parameters
      */
     private function build(string $concrete, array $parameters = []): mixed
     {
+        if (!class_exists($concrete)) {
+            throw ContainerException::notInstantiable($concrete);
+        }
+
         $reflector = $this->getReflector($concrete);
 
         if (!$reflector->isInstantiable()) {
             throw ContainerException::notInstantiable($concrete);
         }
-
-        // 检测生命周期属性
-        $this->detectLifecycleAttribute($concrete, $reflector);
 
         $constructor = $reflector->getConstructor();
 
@@ -447,25 +651,48 @@ final class Container implements ContainerInterface
     }
 
     /**
-     * 检测类上的生命周期属性
+     * 检测类上的生命周期属性（仅当无既有绑定时）
+     *
+     * @return bool 是否已完成自动绑定
      */
-    private function detectLifecycleAttribute(string $concrete, ReflectionClass $reflector): void
+    private function detectLifecycleAttribute(string $concrete): bool
     {
         if (isset($this->bindings[$concrete])) {
-            return;
+            return false;
         }
+
+        if (!class_exists($concrete)) {
+            return false;
+        }
+
+        // kode/attributes 2.0+ 的 Attr 门面已能正确处理 ReflectionClass 目标，
+        // 直接传入反射对象即可，不会再被误读为 Reflection 类自身的属性。
+        $reflector = $this->getReflector($concrete);
 
         if (Attr::has($reflector, Singleton::class)) {
             $this->singleton($concrete);
-        } elseif (Attr::has($reflector, Prototype::class)) {
-            $this->prototype($concrete);
-        } elseif (Attr::has($reflector, ContextualAttr::class)) {
-            $this->contextual($concrete);
+            return true;
         }
+
+        if (Attr::has($reflector, Prototype::class)) {
+            $this->prototype($concrete);
+            return true;
+        }
+
+        if (Attr::has($reflector, ContextualAttr::class)) {
+            $this->contextual($concrete);
+            return true;
+        }
+
+        return false;
     }
 
     /**
      * 解析构造函数依赖
+     *
+     * @param array<int, ReflectionParameter> $parameters
+     * @param array<string, mixed> $passed
+     * @return array<int, mixed>
      */
     private function resolveDependencies(
         array $parameters,
@@ -476,8 +703,22 @@ final class Container implements ContainerInterface
 
         foreach ($parameters as $parameter) {
             $name = $parameter->getName();
+            $hasPassed = array_key_exists($name, $passed);
 
-            if (array_key_exists($name, $passed)) {
+            // 可变参数：显式传入时展开，否则不追加任何实参
+            if ($parameter->isVariadic()) {
+                if ($hasPassed) {
+                    $values = $passed[$name];
+
+                    foreach (is_array($values) ? $values : [$values] as $value) {
+                        $resolved[] = $value;
+                    }
+                }
+
+                continue;
+            }
+
+            if ($hasPassed) {
                 $resolved[] = $passed[$name];
                 continue;
             }
@@ -494,32 +735,34 @@ final class Container implements ContainerInterface
     private function resolveParameter(ReflectionParameter $parameter, string $class): mixed
     {
         $name = $parameter->getName();
-        $type = $parameter->getType();
 
-        // 检查 #[Inject] 属性
-        $injectAttr = Attr::get($parameter, Inject::class);
-        if ($injectAttr !== null) {
-            $inject = $injectAttr->getInstance();
-            $serviceId = $inject->id;
+        // 检查 #[Inject] 属性（带显式 id 时优先）。
+        // kode/attributes 2.0+ 的 Attr::instance 可直接以 ReflectionParameter 为目标读取属性实例，
+        // 不再需要绕过到 Attr::reader()->getParameterAttrs()。
+        /** @var Inject|null $inject */
+        $inject = Attr::instance($parameter, Inject::class);
 
-            if ($serviceId !== null) {
-                return $this->resolve($serviceId);
-            }
+        if ($inject !== null && $inject->id !== null) {
+            return $this->resolve($inject->id);
         }
 
-        // 类型提示自动解析
-        if ($type instanceof ReflectionNamedType && !$type->isBuiltin()) {
-            $typeHint = $type->getName();
+        $type = $parameter->getType();
 
-            // 上下文绑定
-            $contextualImpl = $this->contextual[$class][$typeHint] ?? null;
-            if ($contextualImpl !== null) {
-                return $contextualImpl instanceof Closure
-                    ? $contextualImpl($this)
-                    : $this->resolve($contextualImpl);
+        if ($type !== null) {
+            try {
+                $result = $this->resolveTypedParameter($type, $class);
+            } catch (ServiceNotFoundException|ContainerException $e) {
+                // 可空类型（含 ?T 与 T|null）解析失败时回退为 null
+                if ($type->allowsNull()) {
+                    return null;
+                }
+
+                throw $e;
             }
 
-            return $this->resolve($typeHint);
+            if ($result['resolved']) {
+                return $result['value'];
+            }
         }
 
         // 默认值
@@ -541,7 +784,113 @@ final class Container implements ContainerInterface
     }
 
     /**
-     * 属性注入
+     * 解析类型提示依赖，支持命名类型、联合类型与交叉类型
+     *
+     * @return array{resolved: bool, value: mixed}
+     */
+    private function resolveTypedParameter(ReflectionType $type, string $class): array
+    {
+        if ($type instanceof ReflectionNamedType) {
+            if ($type->isBuiltin()) {
+                return ['resolved' => false, 'value' => null];
+            }
+
+            $typeName = $type->getName();
+
+            // 上下文绑定
+            $contextualImpl = $this->contextual[$class][$typeName] ?? null;
+            if ($contextualImpl !== null) {
+                return [
+                    'resolved' => true,
+                    'value' => $contextualImpl instanceof Closure
+                        ? $contextualImpl($this)
+                        : $this->resolve($contextualImpl),
+                ];
+            }
+
+            return ['resolved' => true, 'value' => $this->resolve($typeName)];
+        }
+
+        if ($type instanceof ReflectionUnionType) {
+            // 联合类型成员可能是交叉类型（DNF 类型，如 (A&B)|null），需递归处理
+            foreach ($type->getTypes() as $inner) {
+                if ($inner instanceof ReflectionNamedType && $inner->isBuiltin()) {
+                    continue;
+                }
+
+                try {
+                    $result = $this->resolveTypedParameter($inner, $class);
+                } catch (ServiceNotFoundException|ContainerException) {
+                    // 尝试联合类型中的下一个候选
+                    continue;
+                }
+
+                if ($result['resolved']) {
+                    return $result;
+                }
+            }
+
+            return ['resolved' => false, 'value' => null];
+        }
+
+        if ($type instanceof ReflectionIntersectionType) {
+            return $this->resolveIntersectionType($type);
+        }
+
+        return ['resolved' => false, 'value' => null];
+    }
+
+    /**
+     * 解析交叉类型 A&B
+     *
+     * 交叉类型要求实例同时满足所有成员约束，因此逐个尝试解析候选，
+     * 并校验结果是否 instanceof 全部成员，只有完全满足才采用。
+     *
+     * @return array{resolved: bool, value: mixed}
+     */
+    private function resolveIntersectionType(ReflectionIntersectionType $type): array
+    {
+        $names = [];
+
+        foreach ($type->getTypes() as $inner) {
+            if ($inner instanceof ReflectionNamedType && !$inner->isBuiltin()) {
+                $names[] = $inner->getName();
+            }
+        }
+
+        if ($names === []) {
+            return ['resolved' => false, 'value' => null];
+        }
+
+        foreach ($names as $candidate) {
+            try {
+                $instance = $this->resolve($candidate);
+            } catch (ServiceNotFoundException|ContainerException) {
+                continue;
+            }
+
+            if (!is_object($instance)) {
+                continue;
+            }
+
+            // 校验候选实例是否满足交叉类型的全部约束
+            foreach ($names as $constraint) {
+                if (!$instance instanceof $constraint) {
+                    continue 2;
+                }
+            }
+
+            return ['resolved' => true, 'value' => $instance];
+        }
+
+        return ['resolved' => false, 'value' => null];
+    }
+
+    /**
+     * 属性注入（支持 #[Inject] 与 #[Autowire]）
+     */
+    /**
+     * @param ReflectionClass<object> $reflector
      */
     private function injectProperties(object $instance, ReflectionClass $reflector): object
     {
@@ -550,13 +899,18 @@ final class Container implements ContainerInterface
                 continue;
             }
 
-            $injectAttr = Attr::get($property, Inject::class);
-            if ($injectAttr === null) {
+            // kode/attributes 2.0+ 的 Attr::instance 可直接以 ReflectionProperty 为目标读取属性实例。
+            /** @var Inject|null $inject */
+            $inject = Attr::instance($property, Inject::class);
+            /** @var Autowire|null $autowire */
+            $autowire = $inject === null ? Attr::instance($property, Autowire::class) : null;
+
+            if ($inject === null && $autowire === null) {
                 continue;
             }
 
-            $inject = $injectAttr->getInstance();
-            $serviceId = $inject->id;
+            $serviceId = $inject?->id;
+            $required = $inject === null || $inject->required;
 
             if ($serviceId === null) {
                 $type = $property->getType();
@@ -566,7 +920,7 @@ final class Container implements ContainerInterface
             }
 
             if ($serviceId === null) {
-                if ($inject->required) {
+                if ($required) {
                     throw ContainerException::unresolvedParameter(
                         $property->getName(),
                         $reflector->getName()
@@ -588,15 +942,33 @@ final class Container implements ContainerInterface
     }
 
     /**
-     * 应用扩展器
+     * 应用扩展器与解析回调（非对象值原样返回）
+     *
+     * 顺序：extend（可替换实例） -> resolving（观察） -> afterResolving（观察）
      */
-    private function applyExtenders(string $id, object $instance): object
+    private function applyExtenders(string $id, mixed $instance): mixed
     {
-        $id = $this->resolveAlias($id);
-        $extenders = $this->extenders[$id] ?? [];
+        if (!is_object($instance)) {
+            return $instance;
+        }
 
-        foreach ($extenders as $extender) {
-            $instance = $extender($instance, $this);
+        $id = $this->resolveAlias($id);
+
+        foreach ($this->extenders[$id] ?? [] as $extender) {
+            $extended = $extender($instance, $this);
+
+            // 扩展器返回 null 视为「仅观察」，保留原实例，避免误吞服务
+            if (is_object($extended)) {
+                $instance = $extended;
+            }
+        }
+
+        foreach ($this->resolvingCallbacks[$id] ?? [] as $callback) {
+            $callback($instance, $this);
+        }
+
+        foreach ($this->afterResolvingCallbacks[$id] ?? [] as $callback) {
+            $callback($instance, $this);
         }
 
         return $instance;
@@ -604,28 +976,51 @@ final class Container implements ContainerInterface
 
     /**
      * 调用方法并注入依赖
+     *
+     * @param callable|array{0: object|string, 1: string} $callback
+     * @param array<string, mixed> $parameters
      */
-    private function callMethod(callable $callback, array $parameters = []): mixed
+    private function callMethod(callable|array $callback, array $parameters = []): mixed
     {
         if (is_array($callback)) {
-            [$class, $method] = $callback;
+            $target = $callback[0] ?? null;
+            $method = $callback[1] ?? null;
 
-            if (is_string($class)) {
-                $class = $this->resolve($class);
+            if (!is_string($method) || (!is_string($target) && !is_object($target))) {
+                throw ContainerException::invalidCallable('array callable');
             }
 
-            $reflection = new ReflectionMethod($class, $method);
+            $declaredClass = is_string($target) ? $target : $target::class;
+
+            $instance = is_string($target) ? $this->resolve($target) : $target;
+
+            if (!is_object($instance)) {
+                throw ContainerException::invalidCallable($declaredClass . '::' . $method);
+            }
+
+            $key = get_class($instance) . '::' . $method;
+
+            // 方法绑定优先（同时兼容按声明类名注册的绑定）
+            $binding = $this->methodBindings[$key]
+                ?? $this->methodBindings[$declaredClass . '::' . $method]
+                ?? null;
+
+            if ($binding !== null) {
+                return $binding($instance, $this);
+            }
+
+            $reflection = new ReflectionMethod($instance, $method);
             $dependencies = $this->resolveDependencies(
                 $reflection->getParameters(),
-                is_string($callback[0]) ? $callback[0] : get_class($class),
+                $declaredClass,
                 $parameters
             );
 
-            return $reflection->invokeArgs($class, $dependencies);
+            return $reflection->invokeArgs($instance, $dependencies);
         }
 
         if ($callback instanceof Closure || is_string($callback)) {
-            $reflection = new \ReflectionFunction($callback);
+            $reflection = new ReflectionFunction($callback);
             $dependencies = $this->resolveFunctionDependencies(
                 $reflection->getParameters(),
                 $parameters
@@ -639,46 +1034,23 @@ final class Container implements ContainerInterface
 
     /**
      * 解析函数依赖
+     *
+     * @param array<int, ReflectionParameter> $parameters
+     * @param array<string, mixed> $passed
+     * @return array<int, mixed>
      */
     private function resolveFunctionDependencies(array $parameters, array $passed = []): array
     {
-        $resolved = [];
-
-        foreach ($parameters as $parameter) {
-            $name = $parameter->getName();
-
-            if (array_key_exists($name, $passed)) {
-                $resolved[] = $passed[$name];
-                continue;
-            }
-
-            $type = $parameter->getType();
-
-            if ($type instanceof ReflectionNamedType && !$type->isBuiltin()) {
-                $resolved[] = $this->resolve($type->getName());
-                continue;
-            }
-
-            if ($parameter->isDefaultValueAvailable()) {
-                $resolved[] = $parameter->getDefaultValue();
-                continue;
-            }
-
-            if ($parameter->isVariadic()) {
-                $resolved[] = [];
-                continue;
-            }
-
-            $resolved[] = null;
-        }
-
-        return $resolved;
+        // 与构造函数依赖解析共用同一套规则，避免两条路径行为漂移
+        return $this->resolveDependencies($parameters, self::CLOSURE_CONTEXT, $passed);
     }
 
     /**
      * 解析上下文隔离服务
-     * 
+     *
      * 当 kode/context 可用时，使用其进行协程间隔离
+     *
+     * @param array<string, mixed> $parameters
      */
     private function resolveContextual(string $id, Binding $binding, array $parameters): mixed
     {
@@ -701,7 +1073,7 @@ final class Container implements ContainerInterface
 
     /**
      * 创建懒加载代理
-     * 
+     *
      * PHP 8.4+ 使用原生懒加载对象
      * PHP 8.1-8.3 使用匿名类代理
      */
@@ -720,22 +1092,29 @@ final class Container implements ContainerInterface
     private function createNativeLazyProxy(string $id, Binding $binding): mixed
     {
         $concrete = $binding->getConcrete();
-        $className = is_string($concrete) ? $concrete : \stdClass::class;
+        $className = is_string($concrete) && class_exists($concrete)
+            ? $concrete
+            : \stdClass::class;
 
         $reflector = $this->getReflector($className);
 
+        /** @phpstan-ignore-next-line method.exists (ReflectionClass::newLazyProxy 需 PHP 8.4+) */
         return $reflector->newLazyProxy(function () use ($binding) {
-            return $this->buildBinding($binding);
+            return $this->buildBindingPublic($binding);
         });
     }
 
     /**
      * 创建传统懒加载代理 (PHP 8.1-8.3)
+     *
+     * 通过魔术方法转发调用，仅在首次访问时真正实例化。
+     * 注意：代理为匿名类实例，不支持 instanceof 实际类型判断。
      */
     private function createLegacyLazyProxy(Binding $binding): mixed
     {
         $container = $this;
-        return new class($container, $binding) {
+
+        return new class($container, $binding) implements \ArrayAccess {
             private ?object $instance = null;
 
             private Container $container;
@@ -748,41 +1127,140 @@ final class Container implements ContainerInterface
                 $this->binding = $binding;
             }
 
-            public function __call(string $method, array $arguments): mixed
+            private function realize(): object
             {
                 if ($this->instance === null) {
-                    $this->instance = $this->container->buildBindingPublic($this->binding);
+                    /** @var object $realized */
+                    $realized = $this->container->buildBindingPublic($this->binding);
+                    $this->instance = $realized;
                 }
 
-                return $this->instance->$method(...$arguments);
+                return $this->instance;
+            }
+
+            /**
+             * @param array<int, mixed> $arguments
+             */
+            public function __call(string $method, array $arguments): mixed
+            {
+                return $this->realize()->$method(...$arguments);
             }
 
             public function __get(string $name): mixed
             {
-                if ($this->instance === null) {
-                    $this->instance = $this->container->buildBindingPublic($this->binding);
-                }
-
-                return $this->instance->$name;
+                return $this->realize()->$name;
             }
 
             public function __set(string $name, mixed $value): void
             {
-                if ($this->instance === null) {
-                    $this->instance = $this->container->buildBindingPublic($this->binding);
+                $this->realize()->$name = $value;
+            }
+
+            public function __isset(string $name): bool
+            {
+                return isset($this->realize()->$name);
+            }
+
+            public function __unset(string $name): void
+            {
+                unset($this->realize()->$name);
+            }
+
+            public function __invoke(mixed ...$args): mixed
+            {
+                $target = $this->realize();
+
+                if (!is_callable($target)) {
+                    throw ContainerException::invalidCallable($this->binding->getId());
                 }
 
-                $this->instance->$name = $value;
+                return $target(...$args);
+            }
+
+            public function __toString(): string
+            {
+                $target = $this->realize();
+
+                if (!method_exists($target, '__toString')) {
+                    throw ContainerException::invalidCallable(
+                        $this->binding->getId() . '::__toString'
+                    );
+                }
+
+                return $target->__toString();
+            }
+
+            /**
+             * @return array<string, mixed>
+             */
+            public function __debugInfo(): array
+            {
+                return [
+                    'lazy' => $this->instance === null,
+                    'instance' => $this->instance,
+                ];
+            }
+
+            #[\Override]
+
+            public function offsetExists(mixed $offset): bool
+            {
+                return isset($this->arrayTarget()[$offset]);
+            }
+
+            #[\Override]
+
+            public function offsetGet(mixed $offset): mixed
+            {
+                return $this->arrayTarget()[$offset];
+            }
+
+            #[\Override]
+
+            public function offsetSet(mixed $offset, mixed $value): void
+            {
+                $this->arrayTarget()[$offset] = $value;
+            }
+
+            #[\Override]
+
+            public function offsetUnset(mixed $offset): void
+            {
+                unset($this->arrayTarget()[$offset]);
+            }
+
+            /**
+             * @return \ArrayAccess<mixed, mixed>
+             */
+            private function arrayTarget(): \ArrayAccess
+            {
+                $target = $this->realize();
+
+                if (!$target instanceof \ArrayAccess) {
+                    throw ContainerException::invalidCallable(
+                        $this->binding->getId() . '::ArrayAccess'
+                    );
+                }
+
+                return $target;
             }
         };
     }
 
     /**
      * 公开的构建绑定方法（供懒加载代理使用）
+     *
+     * 会同时应用扩展器，确保懒加载实例与直接解析行为一致。
      */
     public function buildBindingPublic(Binding $binding): mixed
     {
-        return $this->buildBinding($binding);
+        $instance = $this->buildBinding($binding);
+
+        if (is_object($instance)) {
+            $instance = $this->applyExtenders($binding->getId(), $instance);
+        }
+
+        return $instance;
     }
 
     /**
@@ -800,6 +1278,9 @@ final class Container implements ContainerInterface
 
     /**
      * 获取反射类（带缓存）
+     *
+     * @param class-string $class
+     * @return ReflectionClass<object>
      */
     private function getReflector(string $class): ReflectionClass
     {
@@ -831,6 +1312,7 @@ final class Container implements ContainerInterface
     /**
      * 给服务打标签
      */
+    #[\Override]
     public function tag(string $tag, array $ids): void
     {
         foreach ($ids as $id) {
@@ -845,6 +1327,7 @@ final class Container implements ContainerInterface
     /**
      * 获取所有带指定标签的服务
      */
+    #[\Override]
     public function tagged(string $tag): array
     {
         $resolved = [];
@@ -861,34 +1344,85 @@ final class Container implements ContainerInterface
     /**
      * 创建工厂闭包
      */
+    #[\Override]
     public function factory(string $id): Closure
     {
         return fn(array $parameters = []) => $this->make($id, $parameters);
     }
 
     /**
-     * 环境条件绑定
+     * 环境条件绑定（env 可注入以便测试）
+     *
+     * @param string|array<int, string> $environments 目标环境
+     * @param Closure $callback 命中的回调
+     * @param array<string, mixed>|null $env 可选的环境变量来源（覆盖 $_ENV/$_SERVER）
      */
-    public function environment(string|array $environments, Closure $callback): void
+    public function environment(string|array $environments, Closure $callback, ?array $env = null): void
     {
         $environments = (array) $environments;
 
-        $env = $_ENV['APP_ENV'] ?? $_SERVER['APP_ENV'] ?? 'production';
+        $source = $env ?? array_merge($_ENV, $_SERVER);
+        $current = $source['APP_ENV'] ?? 'production';
 
-        if (in_array($env, $environments, true)) {
+        if (in_array($current, $environments, true)) {
             $callback($this);
         }
     }
 
     /**
      * 条件绑定
+     *
+     * 条件可以是布尔值，也可以是延迟求值的闭包（闭包接收容器自身）。
+     *
+     * @param bool|Closure $condition 布尔条件或返回布尔的闭包
+     * @param Closure $true 条件成立时执行
+     * @param Closure|null $false 条件不成立时执行
      */
-    public function if(string $condition, Closure $true, ?Closure $false = null): void
+    public function if(bool|Closure $condition, Closure $true, ?Closure $false = null): void
     {
-        if ($condition) {
+        $matched = $condition instanceof Closure
+            ? (bool) $condition($this)
+            : $condition;
+
+        if ($matched) {
             $true($this);
         } elseif ($false !== null) {
             $false($this);
         }
+    }
+
+    /**
+     * 获取服务提供者注册表（惰性创建）
+     */
+    private function providers(): ServiceProviderRegistry
+    {
+        return $this->providerRegistry ??= new ServiceProviderRegistry($this);
+    }
+
+    /**
+     * 规范化方法绑定键（支持 Class::method 与 Class@method）
+     */
+    private function normalizeMethodKey(string $method): string
+    {
+        return str_replace('@', '::', $method);
+    }
+
+    /**
+     * 为未找到的服务生成相似建议
+     *
+     * @return string[]
+     */
+    private function suggestId(string $id): array
+    {
+        $suggestions = [];
+        $threshold = max(3, (int) (strlen($id) / 3));
+
+        foreach (array_keys($this->bindings) as $candidate) {
+            if (levenshtein($id, $candidate) <= $threshold) {
+                $suggestions[] = $candidate;
+            }
+        }
+
+        return array_slice($suggestions, 0, 3);
     }
 }

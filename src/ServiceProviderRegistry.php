@@ -9,19 +9,26 @@ use Kode\DI\Exception\ContainerException;
 
 final class ServiceProviderRegistry
 {
-    private ContainerInterface $container;
-
+    /** @var array<int, ServiceProvider> */
     private array $providers = [];
 
+    /** @var array<string, true> */
     private array $loaded = [];
 
+    /** @var array<string, true> 已完成 boot 的提供者（保证幂等） */
+    private array $bootedProviders = [];
+
+    /** @var array<string, ServiceProvider> */
     private array $deferredProviders = [];
 
+    /** @var array<string, string> */
     private array $providesMap = [];
 
-    public function __construct(ContainerInterface $container)
-    {
-        $this->container = $container;
+    private bool $booted = false;
+
+    public function __construct(
+        private ContainerInterface $container
+    ) {
     }
 
     public function register(string|ServiceProvider $provider): void
@@ -30,6 +37,7 @@ final class ServiceProviderRegistry
             $provider = new $provider($this->container);
         }
 
+        /** @var ServiceProvider $provider */
         $class = get_class($provider);
 
         if (isset($this->loaded[$class])) {
@@ -44,10 +52,17 @@ final class ServiceProviderRegistry
         $this->loadProvider($provider);
     }
 
+    /**
+     * 启动所有已注册的提供者
+     *
+     * 幂等：每个提供者的 boot() 至多执行一次，重复调用安全。
+     */
     public function boot(): void
     {
+        $this->booted = true;
+
         foreach ($this->providers as $provider) {
-            $provider->boot();
+            $this->bootProvider($provider);
         }
     }
 
@@ -80,11 +95,17 @@ final class ServiceProviderRegistry
         return isset($this->providesMap[$id]);
     }
 
+    /**
+     * @return array<int, ServiceProvider>
+     */
     public function getProviders(): array
     {
         return $this->providers;
     }
 
+    /**
+     * @return array<int, string>
+     */
     public function getLoaded(): array
     {
         return array_keys($this->loaded);
@@ -109,5 +130,25 @@ final class ServiceProviderRegistry
 
         $this->providers[] = $provider;
         $this->loaded[$class] = true;
+
+        // 若容器已启动，则延迟加载的提供者立即启动
+        if ($this->booted) {
+            $this->bootProvider($provider);
+        }
+    }
+
+    /**
+     * 启动单个提供者（幂等）
+     */
+    private function bootProvider(ServiceProvider $provider): void
+    {
+        $class = get_class($provider);
+
+        if (isset($this->bootedProviders[$class])) {
+            return;
+        }
+
+        $this->bootedProviders[$class] = true;
+        $provider->boot();
     }
 }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\DI;
 
+use Closure;
 use Kode\DI\Contract\ContainerInterface;
 
 /**
@@ -44,6 +45,8 @@ abstract class ServiceProvider
 
     /**
      * 获取提供的内容列表
+     *
+     * @return array<int, string>
      */
     public function provides(): array
     {
@@ -60,6 +63,8 @@ abstract class ServiceProvider
 
     /**
      * 获取触发条件（用于延迟加载）
+     *
+     * @return array<int, string>
      */
     public function when(): array
     {
@@ -68,24 +73,30 @@ abstract class ServiceProvider
 
     /**
      * 绑定服务
+     *
+     * @param Closure|string|null $concrete
      */
-    protected function bind(string $id, callable|string|null $concrete = null): Binding
+    protected function bind(string $id, Closure|string|null $concrete = null): Binding
     {
         return $this->container->bind($id, $concrete);
     }
 
     /**
      * 绑定单例
+     *
+     * @param Closure|string|null $concrete
      */
-    protected function singleton(string $id, callable|string|null $concrete = null): Binding
+    protected function singleton(string $id, Closure|string|null $concrete = null): Binding
     {
         return $this->container->singleton($id, $concrete);
     }
 
     /**
      * 绑定原型
+     *
+     * @param Closure|string|null $concrete
      */
-    protected function prototype(string $id, callable|string|null $concrete = null): Binding
+    protected function prototype(string $id, Closure|string|null $concrete = null): Binding
     {
         return $this->container->prototype($id, $concrete);
     }
@@ -109,7 +120,7 @@ abstract class ServiceProvider
     /**
      * 扩展服务
      */
-    protected function extend(string $id, callable $callback): void
+    protected function extend(string $id, Closure $callback): void
     {
         $this->container->extend($id, $callback);
     }

@@ -7,14 +7,15 @@ namespace Kode\DI\Contract;
 use Closure;
 use Kode\DI\Binding;
 use Kode\DI\Definition;
+use Kode\DI\ServiceProvider;
 use Psr\Container\ContainerInterface as PsrContainerInterface;
 
 interface ContainerInterface extends PsrContainerInterface
 {
-    public const SINGLETON = 'singleton';
-    public const PROTOTYPE = 'prototype';
-    public const LAZY = 'lazy';
-    public const CONTEXTUAL = 'contextual';
+    public const string SINGLETON = 'singleton';
+    public const string PROTOTYPE = 'prototype';
+    public const string LAZY = 'lazy';
+    public const string CONTEXTUAL = 'contextual';
 
     public function bind(string $id, Closure|string|null $concrete = null, string $lifecycle = self::SINGLETON): Binding;
 
@@ -25,6 +26,14 @@ interface ContainerInterface extends PsrContainerInterface
     public function lazy(string $id, Closure|string|null $concrete = null): Binding;
 
     public function contextual(string $id, Closure|string|null $concrete = null): Binding;
+
+    public function bindIf(string $id, Closure|string|null $concrete = null, string $lifecycle = self::SINGLETON): Binding;
+
+    public function singletonIf(string $id, Closure|string|null $concrete = null): Binding;
+
+    public function instanceIf(string $id, object $instance): void;
+
+    public function bound(string $id): bool;
 
     public function alias(string $alias, string $id): void;
 
@@ -46,18 +55,49 @@ interface ContainerInterface extends PsrContainerInterface
 
     public function flush(): void;
 
+    /**
+     * @return array<int, string>
+     */
     public function getBindings(): array;
 
+    /**
+     * @return array<string, string>
+     */
     public function getAliases(): array;
 
+    public function registerProvider(ServiceProvider|string $provider): void;
+
+    /**
+     * @param array<int, ServiceProvider|string> $providers
+     */
+    public function registerProviders(array $providers): void;
+
+    public function bootProviders(): void;
+
+    /**
+     * @param array<string, mixed> $parameters
+     */
     public function resolve(string $id, array $parameters = []): mixed;
 
+    /**
+     * @param array<string, mixed> $parameters
+     */
     public function make(string $id, array $parameters = []): mixed;
 
-    public function call(callable $callback, array $parameters = []): mixed;
+    /**
+     * @param callable|array{0: object|string, 1: string} $callback
+     * @param array<string, mixed> $parameters
+     */
+    public function call(callable|array $callback, array $parameters = []): mixed;
 
+    /**
+     * @param array<int, string> $ids
+     */
     public function tag(string $tag, array $ids): void;
 
+    /**
+     * @return array<string, mixed>
+     */
     public function tagged(string $tag): array;
 
     public function factory(string $id): Closure;

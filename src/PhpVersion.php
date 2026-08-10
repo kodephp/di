@@ -166,6 +166,9 @@ final class PhpVersion
     /**
      * 获取所有特性支持状态
      */
+    /**
+     * @return array<string, mixed>
+     */
     public static function getFeatureSet(): array
     {
         return [

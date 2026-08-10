@@ -17,6 +17,9 @@ final class ContainerException extends RuntimeException implements ContainerExce
     /**
      * 创建循环依赖异常
      */
+    /**
+     * @param array<int, string> $stack
+     */
     public static function circularReference(string $id, array $stack): self
     {
         $path = implode(' -> ', [...$stack, $id]);
@@ -70,5 +73,13 @@ final class ContainerException extends RuntimeException implements ContainerExce
     public static function contextNotSupported(string $id): self
     {
         return new self("上下文隔离需要 kode/context 包支持: {$id}");
+    }
+
+    /**
+     * 创建无效可调用对象异常
+     */
+    public static function invalidCallable(string $target): self
+    {
+        return new self("无法调用非对象目标: {$target}");
     }
 }

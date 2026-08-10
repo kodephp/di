@@ -26,12 +26,6 @@ final class Binding
     /** @var array<string, true> 标签 */
     private array $tags = [];
 
-    /** @var array<string, array<string, string|Closure>> 上下文绑定 */
-    private array $contextual = [];
-
-    /** @var Closure|null 装饰器 */
-    private ?Closure $decorator = null;
-
     /**
      * @param string $id 服务标识
      * @param Closure|string|null $concrete 具体实现
@@ -155,6 +149,9 @@ final class Binding
     /**
      * 添加标签
      */
+    /**
+     * @param string|array<int, string> $tags
+     */
     public function tag(string|array $tags): self
     {
         foreach ((array) $tags as $tag) {
@@ -165,6 +162,8 @@ final class Binding
 
     /**
      * 获取所有标签
+     *
+     * @return array<int, string>
      */
     public function getTags(): array
     {
@@ -177,40 +176,6 @@ final class Binding
     public function hasTag(string $tag): bool
     {
         return isset($this->tags[$tag]);
-    }
-
-    /**
-     * 设置上下文绑定
-     */
-    public function when(string $when, string $needs, string|Closure $give): self
-    {
-        $this->contextual[$when][$needs] = $give;
-        return $this;
-    }
-
-    /**
-     * 获取上下文绑定
-     */
-    public function getContextualFor(string $when, string $needs): string|Closure|null
-    {
-        return $this->contextual[$when][$needs] ?? null;
-    }
-
-    /**
-     * 设置装饰器
-     */
-    public function decorate(Closure $callback): self
-    {
-        $this->decorator = $callback;
-        return $this;
-    }
-
-    /**
-     * 获取装饰器
-     */
-    public function getDecorator(): ?Closure
-    {
-        return $this->decorator;
     }
 
     /**

@@ -28,6 +28,9 @@ final class ServiceNotFoundException extends Exception implements NotFoundExcept
      * @param string $id 服务标识
      * @param array $suggestions 可能的替代服务列表
      */
+    /**
+     * @param array<int, string> $suggestions
+     */
     public static function withSuggestions(string $id, array $suggestions): self
     {
         $hint = count($suggestions) > 0

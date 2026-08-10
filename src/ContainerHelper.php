@@ -34,6 +34,9 @@ final class ContainerHelper
         return self::$instance?->get($id);
     }
 
+    /**
+     * @param array<string, mixed> $parameters
+     */
     public static function make(string $id, array $parameters = []): mixed
     {
         if (self::$instance === null) {
@@ -50,20 +53,16 @@ final class ContainerHelper
 
     public static function bind(string $id, Closure|string|null $concrete = null): Binding
     {
-        if (self::$instance === null) {
-            self::create();
-        }
+        $container = self::$instance ?? self::create();
 
-        return self::$instance->bind($id, $concrete);
+        return $container->bind($id, $concrete);
     }
 
     public static function singleton(string $id, Closure|string|null $concrete = null): Binding
     {
-        if (self::$instance === null) {
-            self::create();
-        }
+        $container = self::$instance ?? self::create();
 
-        return self::$instance->singleton($id, $concrete);
+        return $container->singleton($id, $concrete);
     }
 
     public static function instance(string $id, object $instance): void
@@ -71,6 +70,9 @@ final class ContainerHelper
         self::$instance?->instance($id, $instance);
     }
 
+    /**
+     * @param array<string, mixed> $parameters
+     */
     public static function call(callable $callback, array $parameters = []): mixed
     {
         if (self::$instance === null) {

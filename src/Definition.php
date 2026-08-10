@@ -7,21 +7,21 @@ namespace Kode\DI;
 use Closure;
 
 /**
- * 服务定义（上下文绑定）
- * 
- * 用于定义特定上下文条件下的服务实现
+ * 服务定义（上下文绑定构造器）
+ *
+ * 由 Container::when() 创建并持有容器引用，
+ * needs()/give() 链式调用最终通过容器写入上下文绑定。
  */
 final class Definition
 {
-    /** @var array<string, array<string, string|Closure>> 上下文绑定存储 */
-    private array $contextual = [];
-
     /**
-     * @param string $when 上下文条件
-     * @param string|null $needs 需要的依赖
+     * @param string $when 上下文条件（消费方类）
+     * @param Container|null $container 关联的容器实例
+     * @param string|null $needs 需要的依赖类型
      */
     public function __construct(
         private readonly string $when,
+        private ?Container $container = null,
         private ?string $needs = null
     ) {}
 
@@ -35,22 +35,19 @@ final class Definition
     }
 
     /**
-     * 指定实现
+     * 指定实现，写入容器的上下文绑定
      */
     public function give(string|Closure $implementation): void
     {
         if ($this->needs === null) {
             throw new \LogicException('必须先调用 needs() 方法');
         }
-        $this->contextual[$this->when][$this->needs] = $implementation;
-    }
 
-    /**
-     * 获取所有上下文绑定
-     */
-    public function getContextual(): array
-    {
-        return $this->contextual;
+        if ($this->container === null) {
+            throw new \LogicException('Definition 未关联容器，请通过 Container::when() 创建');
+        }
+
+        $this->container->addContextualBinding($this->when, $this->needs, $implementation);
     }
 
     /**

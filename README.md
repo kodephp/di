@@ -1,20 +1,25 @@
 # kode/di
 
-[![PHP Version](https://img.shields.io/badge/PHP-%3E%3D8.1-8892BF)](https://php.net/)
+[![PHP Version](https://img.shields.io/badge/PHP-%3E%3D8.3-8892BF)](https://php.net/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![PSR-11](https://img.shields.io/badge/PSR-11-Compatible-blue)](https://www.php-fig.org/psr/psr-11/)
 
-高性能 PHP 8.1+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11。
+高性能 PHP 8.3+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11。
 
 ## 特性
 
 - **PSR-11 兼容** - 实现标准容器接口
-- **属性注入** - 基于 PHP 8.1+ Attributes 实现声明式注入
+- **属性注入** - 基于 PHP 8.3+ Attributes 实现声明式注入
 - **生命周期管理** - 单例/原型/懒加载/上下文隔离
+- **上下文绑定** - `when()->needs()->give()` 按消费者定制依赖
+- **服务提供者** - 支持立即注册与延迟（deferred）按需加载
+- **方法绑定** - `bindMethod()` 接管指定类方法的调用
 - **协程安全** - 支持 Fiber/Swoole/Swow 上下文隔离
 - **高性能** - 反射缓存 + 定义缓存
+- **类型健壮** - 联合类型/交叉类型/可空类型/可变参数完整支持
 - **零全局状态** - 无全局变量污染
-- **框架无关** - 可在任何 PHP 8.1+ 项目中使用
+- **静态分析友好** - PHPStan `level=max` 零告警
+- **框架无关** - 可在任何 PHP 8.3+ 项目中使用
 
 ## 安装
 
@@ -96,6 +101,37 @@ class DatabaseServiceProvider extends ServiceProvider
         // 启动逻辑
     }
 }
+
+// 注册到容器
+$container->registerProvider(DatabaseServiceProvider::class);
+$container->registerProviders([CacheServiceProvider::class, QueueServiceProvider::class]);
+
+// 统一启动（幂等，重复调用只 boot 一次）
+$container->bootProviders();
+```
+
+#### 延迟（deferred）提供者
+
+声明 `$deferred = true` 并列出 `$provides`，提供者只在其服务**首次被解析**时才加载注册，
+显著降低启动开销。若容器已 `bootProviders()`，延迟加载的提供者会立即补跑 `boot()`。
+
+```php
+class ReportServiceProvider extends ServiceProvider
+{
+    protected bool $deferred = true;
+
+    protected array $provides = [ReportGenerator::class];
+
+    public function register(): void
+    {
+        $this->singleton(ReportGenerator::class);
+    }
+}
+
+$container->registerProvider(ReportServiceProvider::class);
+// 此刻尚未 register()
+
+$container->get(ReportGenerator::class); // 触发加载 + register() + boot()
 ```
 
 ### 上下文绑定
@@ -123,9 +159,76 @@ $container->singleton(SessionInterface::class, RedisSession::class)->tag('cache'
 $cacheServices = $container->tagged('cache');
 ```
 
+### 方法绑定
+
+接管指定「类::方法」的调用逻辑，`call()` 会优先走绑定的闭包而不做反射注入。
+
+```php
+$container->bindMethod(ReportService::class . '::generate', function (ReportService $svc, $c) {
+    return $svc->generate('custom-template');
+});
+
+$container->call([ReportService::class, 'generate']); // 走绑定闭包
+```
+
+### 幂等注册
+
+在插件化 / 多提供者场景下避免重复绑定互相覆盖，
+`*If` 系列只在**尚未绑定**时才生效。
+
+```php
+$container->bindIf(LoggerInterface::class, FileLogger::class);
+$container->singletonIf(CacheInterface::class, RedisCache::class);
+$container->instanceIf('config', $config);
+
+$container->bound(LoggerInterface::class); // true
+```
+
+### 解析钩子
+
+`resolving` / `afterResolving` 是**非侵入式观察者**：回调返回值不会替换实例，
+需要替换实例请使用 `extend()`。
+
+```php
+// 观察者：不改变实例
+$container->resolving(Connection::class, function ($conn, $c) {
+    $conn->setLogger($c->get(LoggerInterface::class));
+});
+
+// 装饰器：返回值会替换实例
+$container->extend(Connection::class, fn($conn, $c) => new TracedConnection($conn));
+```
+
+### 条件注册与环境
+
+`environment()` 支持传入自定义环境来源（便于测试），未传入时回退读取 `$_ENV` / `$_SERVER`。
+
+```php
+$container->environment('production', function ($c) {
+    $c->singleton(CacheInterface::class, RedisCache::class);
+});
+
+// 测试中注入环境来源，避免依赖全局状态
+$container->environment(['dev', 'testing'], $callback, ['APP_ENV' => 'testing']);
+
+// 条件支持布尔值，也支持延迟求值的闭包（闭包接收容器自身）
+$container->if($featureEnabled, $whenTrue, $whenFalse);
+$container->if(fn($c) => $c->bound(CacheInterface::class), $whenTrue);
+```
+
+### 工厂
+
+```php
+$factory = $container->factory(Request::class);
+$r1 = $factory();
+$r2 = $factory(); // 每次调用重新解析
+```
+
 ## API 参考
 
 ### Container
+
+**绑定**
 
 | 方法 | 说明 |
 |------|------|
@@ -134,16 +237,50 @@ $cacheServices = $container->tagged('cache');
 | `prototype(id, concrete)` | 绑定原型 |
 | `lazy(id, concrete)` | 绑定懒加载 |
 | `contextual(id, concrete)` | 绑定上下文隔离 |
-| `instance(id, instance)` | 绑定实例 |
+| `instance(id, instance)` | 绑定已有实例 |
+| `bindIf(id, concrete, lifecycle)` | 未绑定时才绑定 |
+| `singletonIf(id, concrete)` | 未绑定时才绑定单例 |
+| `instanceIf(id, instance)` | 未绑定时才绑定实例 |
 | `alias(alias, id)` | 设置别名 |
-| `extend(id, callback)` | 扩展服务 |
-| `get(id)` | 获取服务 |
-| `has(id)` | 检查服务是否存在 |
-| `make(id, parameters)` | 创建实例 |
-| `call(callback, parameters)` | 调用方法 |
+| `bound(id)` | 是否已绑定（含别名 / 实例） |
+
+**解析**
+
+| 方法 | 说明 |
+|------|------|
+| `get(id)` | 获取服务（PSR-11） |
+| `has(id)` | 检查服务是否可解析（PSR-11） |
+| `make(id, parameters)` | 带参数创建实例 |
+| `resolve(id, parameters)` | 解析服务（`make` 的底层实现） |
+| `call(callback, parameters)` | 调用可调用对象并注入依赖 |
+| `factory(id)` | 返回每次调用都重新解析的工厂闭包 |
 | `resolved(id)` | 检查是否已解析 |
-| `forget(id)` | 移除绑定 |
+
+**上下文与扩展**
+
+| 方法 | 说明 |
+|------|------|
+| `when(consumer)->needs(dep)->give(impl)` | 上下文绑定 |
+| `addContextualBinding(when, needs, give)` | 直接添加上下文绑定 |
+| `extend(id, callback)` | 装饰服务（返回值替换实例） |
+| `resolving(id, callback)` | 解析时观察者（不改变实例） |
+| `afterResolving(id, callback)` | 解析后观察者（不改变实例） |
+| `rebinding(id, callback)` | 重新绑定回调 |
+| `bindMethod(method, callback)` | 绑定类方法调用逻辑 |
+| `tag(tag, ids)` / `tagged(tag)` | 打标签 / 按标签批量取 |
+
+**提供者与生命周期**
+
+| 方法 | 说明 |
+|------|------|
+| `registerProvider(provider)` | 注册单个服务提供者 |
+| `registerProviders(providers)` | 批量注册服务提供者 |
+| `bootProviders()` | 启动全部已注册提供者（幂等） |
+| `environment(envs, callback, env?)` | 按环境条件注册（`env` 可注入，便于测试） |
+| `if(bool\|Closure, true, false?)` | 按条件注册，条件支持闭包延迟求值 |
+| `forget(id)` | 移除绑定及其实例 / 扩展器 / 上下文 |
 | `flush()` | 清空容器 |
+| `Container::clearCache()` | 清空全局反射缓存 |
 
 ### Attributes
 
@@ -154,6 +291,42 @@ $cacheServices = $container->tagged('cache');
 | `#[Singleton]` | Class | 标记为单例 |
 | `#[Prototype]` | Class | 标记为原型 |
 | `#[Contextual]` | Class | 标记为上下文隔离 |
+
+## 健壮性说明
+
+### 类型解析
+
+构造函数与可调用对象的参数按以下顺序解析，覆盖 PHP 8 全部类型形态：
+
+| 类型形态 | 行为 |
+|----------|------|
+| 命名类型 `Foo` | 直接解析；不可解析且不可空则抛异常 |
+| 可空类型 `?Foo` | 解析失败时回退 `null`（含未绑定接口） |
+| 联合类型 `A\|B` | 依次尝试各非内置成员，取第一个成功的 |
+| 交叉类型 `A&B` | 逐个解析候选，仅采用 `instanceof` **全部**成员的实例 |
+| DNF 类型 `(A&B)\|null` | 递归下探联合中的交叉成员，失败回退 `null` |
+| 内置类型 `int/string` | 使用默认值；无默认值且不可空则抛异常 |
+| 可变参数 `...$args` | 展开传入数组，未提供时为空 |
+| 显式传参 | 按参数名优先命中，绕过类型解析 |
+
+> 注意：`class_exists()` 对接口返回 `false`，容器内部统一用 `class_exists() || interface_exists()`
+> 判定，避免未绑定接口在可空位置误抛异常。
+
+### 循环依赖检测
+
+已绑定路径与**自动解析路径**均设有递归守卫，互相依赖的未绑定类会抛出
+`ContainerException` 并附带完整依赖链，而不是耗尽内存。
+
+```php
+// A 依赖 B，B 依赖 A（两者均未绑定）
+$container->get(A::class); // ContainerException: 检测到循环依赖: A -> B -> A
+```
+
+### 懒加载
+
+PHP 8.4+ 使用原生 `newLazyProxy`；低版本回退到内建代理类，
+支持 `__get/__set/__isset/__unset/__call/__invoke/__toString/ArrayAccess`。
+代理会缓存已实例化的目标，**底层实例只创建一次**。
 
 ## 与其他 kode 组件集成
 
@@ -170,8 +343,8 @@ use Kode\Context\Context;
 
 | PHP 版本 | 支持状态 |
 |----------|----------|
-| PHP 8.1 | ✅ 完全支持 |
-| PHP 8.2 | ✅ 完全支持 |
+| PHP 8.1 | ❌ 不支持（要求 8.3+） |
+| PHP 8.2 | ❌ 不支持（要求 8.3+） |
 | PHP 8.3 | ✅ 完全支持 |
 | PHP 8.4 | ✅ 完全支持 |
 | PHP 8.5 | ✅ 完全支持 |
@@ -185,11 +358,16 @@ use Kode\Context\Context;
 | Hyperf | ✅ 完全兼容 |
 | 原生 PHP | ✅ 完全兼容 |
 
-## 测试
+## 测试与质量校验
 
 ```bash
-composer test
+composer test           # PHPUnit 全量用例
+composer test:coverage  # 生成 HTML 覆盖率报告
+composer check          # PHPStan level=max 静态分析
+composer fix            # php-cs-fixer 按 PSR-12 格式化
 ```
+
+当前状态：**63 个测试 / 98 处断言全部通过**，PHPStan `level=max` **零告警**。
 
 ## 许可证
 

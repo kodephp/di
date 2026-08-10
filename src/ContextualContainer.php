@@ -87,6 +87,9 @@ final class ContextualContainer
         $contextClass::delete($contextKey);
     }
 
+    /**
+     * @param array<string, mixed> $parameters
+     */
     public static function resolve(string $id, array $parameters = [], ?string $contextKey = null): mixed
     {
         if (self::$container === null) {
@@ -111,6 +114,9 @@ final class ContextualContainer
         return self::$container->make($id, $parameters);
     }
 
+    /**
+     * @param array<string, mixed>|null $initialContext
+     */
     public static function runInContext(Closure $callback, ?array $initialContext = null): mixed
     {
         if (!self::isContextAvailable()) {
@@ -119,7 +125,7 @@ final class ContextualContainer
 
         $contextClass = 'Kode\Context\Context';
 
-        return $contextClass::run(function () use ($callback, $initialContext) {
+        return $contextClass::run(function () use ($callback, $initialContext, $contextClass) {
             if ($initialContext !== null) {
                 foreach ($initialContext as $key => $value) {
                     $contextClass::set($key, $value);
