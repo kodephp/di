@@ -26,6 +26,9 @@ final class Binding
     /** @var array<string, true> 标签 */
     private array $tags = [];
 
+    /** @var bool 是否为 instance() 直接注册的实例型绑定（无具体构造器可重建） */
+    private bool $isInstance = false;
+
     /**
      * @param string $id 服务标识
      * @param Closure|string|null $concrete 具体实现
@@ -109,6 +112,26 @@ final class Binding
     public function isContextual(): bool
     {
         return $this->lifecycle === ContainerInterface::CONTEXTUAL;
+    }
+
+    /**
+     * 是否为 instance() 直接注册的实例型绑定
+     *
+     * 实例型绑定没有可重建的具体构造器，refresh() 时应保留原实例。
+     */
+    public function isInstance(): bool
+    {
+        return $this->isInstance;
+    }
+
+    /**
+     * 标记为实例型绑定
+     */
+    public function markInstance(): self
+    {
+        $this->isInstance = true;
+
+        return $this;
     }
 
     /**

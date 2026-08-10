@@ -253,6 +253,9 @@ unset($container['logger']);
 // 强制重建单例：丢弃实例缓存，下次解析重新构建，但不删除绑定定义
 $newInstance = $container->refresh(HeavyService::class);
 
+// 实例型绑定（instance() 注册、无具体构造器）refresh 不会重建对象，
+// 而是保留原实例并重新挂载扩展器与解析回调后返回，避免无构造器可调用而失败。
+
 // 冻结容器：配置全部就绪后调用，禁止后续任何运行时增删 / 变更绑定。
 // 读取类方法（get/has/resolve/make/call/tagged 等）不受影响，适合生产环境防误改。
 $container->freeze();
@@ -305,7 +308,7 @@ $repo = $container->get(RepositoryInterface::class);
 | `prototype(id, concrete)` | 绑定原型 |
 | `lazy(id, concrete)` | 绑定懒加载 |
 | `contextual(id, concrete)` | 绑定上下文隔离 |
-| `instance(id, instance)` | 绑定已有实例 |
+| `instance(id, instance)` | 绑定已有实例（同样经过扩展器并触发 `resolving`/`afterResolving` 回调，与 `resolve()` 单例一致） |
 | `bindIf(id, concrete, lifecycle)` | 未绑定时才绑定 |
 | `singletonIf(id, concrete)` | 未绑定时才绑定单例 |
 | `instanceIf(id, instance)` | 未绑定时才绑定实例 |

@@ -305,7 +305,13 @@ final class Container implements ContainerInterface, \ArrayAccess
         $binding = new Binding($id);
         $binding->setInstance($instance);
         $binding->setLifecycle(self::SINGLETON);
+        $binding->markInstance();
 
+        // 与 resolve() 产生的单例保持一致：经过扩展器并触发解析回调，
+        // 使手动注册的实例同样可被观察与装饰。自注册（容器自身）无扩展器/回调，无副作用。
+        $instance = $this->applyExtenders($id, $instance);
+
+        $binding->setInstance($instance);
         $this->bindings[$id] = $binding;
         $this->instances[$id] = $instance;
     }
@@ -1017,6 +1023,25 @@ final class Container implements ContainerInterface, \ArrayAccess
         }
 
         // 先触发指定 id 的回调，再触发全局 '*' 通配回调（观察者语义，返回值忽略）
+        $this->fireResolvingCallbacks($id, $instance);
+
+        return $instance;
+    }
+
+    /**
+     * 触发解析观察者回调（resolving 在前，afterResolving 在后）。
+     *
+     * 同时触发指定 id 的回调与全局 '*' 通配回调，使手动注册的实例
+     * 与解析出的单例在可观察性上保持一致。
+     */
+    private function fireResolvingCallbacks(string $id, mixed $instance): void
+    {
+        if (!is_object($instance)) {
+            return;
+        }
+
+        $id = $this->resolveAlias($id);
+
         foreach ([$id, '*'] as $key) {
             foreach ($this->resolvingCallbacks[$key] ?? [] as $callback) {
                 $callback($instance, $this);
@@ -1028,8 +1053,6 @@ final class Container implements ContainerInterface, \ArrayAccess
                 $callback($instance, $this);
             }
         }
-
-        return $instance;
     }
 
     /**
@@ -1546,10 +1569,22 @@ final class Container implements ContainerInterface, \ArrayAccess
 
         $id = $this->resolveAlias($id);
 
+        $binding = $this->bindings[$id] ?? null;
+
+        // 实例型绑定没有可重建的具体构造器：保留原实例，
+        // 仅重新挂载扩展器与解析回调后返回，避免尝试 buildBinding 而失败。
+        if ($binding !== null && $binding->isInstance()) {
+            $instance = $this->applyExtenders($id, $binding->getInstance());
+            $binding->setInstance($instance);
+            $this->instances[$id] = $instance;
+
+            return $instance;
+        }
+
         unset($this->instances[$id]);
 
-        if (isset($this->bindings[$id])) {
-            $this->bindings[$id]->reset();
+        if ($binding !== null) {
+            $binding->reset();
         }
 
         return $this->resolve($id);

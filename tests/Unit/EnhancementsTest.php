@@ -279,6 +279,69 @@ class EnhancementsTest extends TestCase
 
         $this->assertTrue($fired);
     }
+
+    // ---------------------------------------------------------------
+    // instance() 与 resolve() 行为一致（扩展器 + 解析回调）
+    // ---------------------------------------------------------------
+
+    public function testInstanceFiresAfterResolvingCallbacks(): void
+    {
+        $seen = null;
+
+        $this->container->afterResolving(EnhSvc::class, static function ($instance) use (&$seen): void {
+            $seen = $instance;
+        });
+
+        $svc = new EnhSvc();
+        $this->container->instance(EnhSvc::class, $svc);
+
+        $this->assertSame($svc, $seen);
+    }
+
+    public function testExtendAppliesToInstanceBinding(): void
+    {
+        $this->container->extend(EnhState::class, static function (EnhState $s): EnhState {
+            $s->value = 42;
+            return $s;
+        });
+
+        $svc = new EnhState();
+        $this->container->instance(EnhState::class, $svc);
+
+        $this->assertSame(42, $svc->value);
+        $this->assertSame($svc, $this->container->get(EnhState::class));
+    }
+
+    // ---------------------------------------------------------------
+    // refresh：实例型绑定（无具体构造器）不应崩溃
+    // ---------------------------------------------------------------
+
+    public function testRefreshOnInstanceBindingReturnsSameInstance(): void
+    {
+        $svc = new EnhState();
+        $svc->value = 7;
+        $this->container->instance(EnhState::class, $svc);
+
+        $refreshed = $this->container->refresh(EnhState::class);
+
+        $this->assertSame($svc, $refreshed);
+        $this->assertSame(7, $refreshed->value);
+    }
+
+    public function testRefreshReFiresResolvingCallbacks(): void
+    {
+        $count = 0;
+        $this->container->afterResolving(EnhState::class, static function () use (&$count): void {
+            $count++;
+        });
+
+        $this->container->singleton(EnhState::class, EnhState::class);
+        $this->container->get(EnhState::class);
+        $this->assertSame(1, $count);
+
+        $this->container->refresh(EnhState::class);
+        $this->assertSame(2, $count);
+    }
 }
 
 // ---------------------------------------------------------------
