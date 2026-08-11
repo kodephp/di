@@ -65,7 +65,7 @@ final class ContainerHelper
         return $container->singleton($id, $concrete);
     }
 
-    public static function instance(string $id, object $instance): void
+    public static function instance(string $id, mixed $instance): void
     {
         self::$instance?->instance($id, $instance);
     }

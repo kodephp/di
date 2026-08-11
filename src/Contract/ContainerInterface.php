@@ -31,7 +31,7 @@ interface ContainerInterface extends PsrContainerInterface
 
     public function singletonIf(string $id, Closure|string|null $concrete = null): Binding;
 
-    public function instanceIf(string $id, object $instance): void;
+    public function instanceIf(string $id, mixed $instance): void;
 
     public function bound(string $id): bool;
 
@@ -45,7 +45,7 @@ interface ContainerInterface extends PsrContainerInterface
 
     public function give(string|Closure $implementation): void;
 
-    public function instance(string $id, object $instance): void;
+    public function instance(string $id, mixed $instance): void;
 
     public function has(string $id): bool;
 

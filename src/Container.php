@@ -205,10 +205,10 @@ final class Container implements ContainerInterface, \ArrayAccess
     }
 
     /**
-     * 幂等实例绑定
+     * 幂等实例绑定（未绑定时才生效；同 instance() 支持任意值）
      */
     #[\Override]
-    public function instanceIf(string $id, object $instance): void
+    public function instanceIf(string $id, mixed $instance): void
     {
         $resolved = $this->resolveAlias($id);
 
@@ -295,10 +295,13 @@ final class Container implements ContainerInterface, \ArrayAccess
     }
 
     /**
-     * 注册已存在的实例
+     * 注册已存在的实例（对象或标量 / 数组等任意值）
+     *
+     * 允许将标量、数组等非对象值也作为容器条目存放（如 Application 的 path.base 等路径配置），
+     * 之后可通过 get() 原样取回。非对象值不会经过扩展器与解析回调（其语义仅对对象有意义）。
      */
     #[\Override]
-    public function instance(string $id, object $instance): void
+    public function instance(string $id, mixed $instance): void
     {
         $this->assertNotFrozen("注册实例：{$id}");
 

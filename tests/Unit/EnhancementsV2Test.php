@@ -178,6 +178,47 @@ class EnhancementsV2Test extends TestCase
         $this->assertSame('invoked:dep', $result);
     }
 
+    // ---------------------------------------------------------------
+    // instance() 支持标量 / 数组（如 Application 的 path.base）
+    // ---------------------------------------------------------------
+
+    public function testInstanceAcceptsScalar(): void
+    {
+        $this->container->instance('path.base', '/var/www');
+
+        $this->assertSame('/var/www', $this->container->get('path.base'));
+    }
+
+    public function testInstanceAcceptsArray(): void
+    {
+        $config = ['debug' => true, 'name' => 'app'];
+        $this->container->instance('config', $config);
+
+        $this->assertSame($config, $this->container->get('config'));
+    }
+
+    public function testInstanceScalarBypassesExtendersAndCallbacks(): void
+    {
+        // 非对象值不应经过扩展器 / 解析回调（其语义仅对对象有意义）
+        $touched = false;
+        $this->container->afterResolving('scalar.id', function () use (&$touched): void {
+            $touched = true;
+        });
+
+        $this->container->instance('scalar.id', 42);
+
+        $this->assertFalse($touched);
+        $this->assertSame(42, $this->container->get('scalar.id'));
+    }
+
+    public function testInstanceIfAcceptsScalar(): void
+    {
+        $this->container->instanceIf('path.cache', '/tmp/cache');
+
+        $this->assertSame('/tmp/cache', $this->container->get('path.cache'));
+        $this->assertTrue($this->container->bound('path.cache'));
+    }
+
     public function testCallInvokableClassStringWithParameters(): void
     {
         $result = $this->container->call(V2InvokableWithParam::class, ['suffix' => '!']);

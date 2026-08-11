@@ -370,7 +370,7 @@ $repo = $container->get(RepositoryInterface::class);
 | `prototype(id, concrete)` | 绑定原型 |
 | `lazy(id, concrete)` | 绑定懒加载 |
 | `contextual(id, concrete)` | 绑定上下文隔离 |
-| `instance(id, instance)` | 绑定已有实例（同样经过扩展器并触发 `resolving`/`afterResolving` 回调，与 `resolve()` 单例一致） |
+| `instance(id, instance)` | 绑定已有实例（支持任意值：对象、标量、数组等）。非对象值原样存储并取回，不经过扩展器与解析回调 |
 | `bindIf(id, concrete, lifecycle)` | 未绑定时才绑定 |
 | `singletonIf(id, concrete)` | 未绑定时才绑定单例 |
 | `instanceIf(id, instance)` | 未绑定时才绑定实例 |
