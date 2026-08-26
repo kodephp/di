@@ -56,6 +56,15 @@ interface ContainerInterface extends PsrContainerInterface
     public function flush(): void;
 
     /**
+     * 预热编译缓存（控制器 / 服务类启动时预先编译）
+     *
+     * 提前对一组类执行反射 + 属性分析，使后续解析走编译缓存、不产生反射开销。
+     *
+     * @param array<int, string> $classes
+     */
+    public function warmup(array $classes): void;
+
+    /**
      * @return array<int, string>
      */
     public function getBindings(): array;

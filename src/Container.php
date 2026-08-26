@@ -9,6 +9,7 @@ use ReflectionClass;
 use ReflectionMethod;
 use ReflectionFunction;
 use ReflectionParameter;
+use ReflectionProperty;
 use ReflectionNamedType;
 use ReflectionUnionType;
 use ReflectionIntersectionType;
@@ -75,6 +76,12 @@ final class Container implements ContainerInterface, \ArrayAccess
 
     /** @var array<string, ReflectionClass<object>> 反射缓存（按类名共享，跨容器安全） */
     private static array $reflectionCache = [];
+
+    /** @var array<string, CompiledDefinition> 编译后的类构建元数据（反射+属性分析一次完成，跨容器共享且不可变） */
+    private static array $compiled = [];
+
+    /** @var array<string, ReflectionMethod> 方法反射缓存（按 类::方法 共享，控制器动作解析复用） */
+    private static array $methodCache = [];
 
     /** @var bool kode/context 是否可用 */
     private static bool $contextAvailable = false;
@@ -727,21 +734,22 @@ final class Container implements ContainerInterface, \ArrayAccess
             throw ContainerException::notInstantiable($concrete);
         }
 
-        $constructor = $reflector->getConstructor();
+        $def = $this->getCompiled($concrete);
 
-        if ($constructor === null) {
+        if ($def->constructor === null) {
             $instance = new $concrete();
-            return $this->injectProperties($instance, $reflector);
+            return $this->injectProperties($instance, $def);
         }
 
         $dependencies = $this->resolveDependencies(
-            $constructor->getParameters(),
+            $def->params,
             $concrete,
+            $def->paramInject,
             $parameters
         );
 
         $instance = $reflector->newInstanceArgs($dependencies);
-        return $this->injectProperties($instance, $reflector);
+        return $this->injectProperties($instance, $def);
     }
 
     /**
@@ -785,12 +793,14 @@ final class Container implements ContainerInterface, \ArrayAccess
      * 解析构造函数依赖
      *
      * @param array<int, ReflectionParameter> $parameters
+     * @param array<string, Inject|null> $paramInject 参数名 => #[Inject]（来自编译元数据，避免重复读属性）
      * @param array<string, mixed> $passed
      * @return array<int, mixed>
      */
     private function resolveDependencies(
         array $parameters,
         string $class,
+        array $paramInject,
         array $passed = []
     ): array {
         $resolved = [];
@@ -817,7 +827,7 @@ final class Container implements ContainerInterface, \ArrayAccess
                 continue;
             }
 
-            $resolved[] = $this->resolveParameter($parameter, $class);
+            $resolved[] = $this->resolveParameter($parameter, $class, $paramInject[$name] ?? null);
         }
 
         return $resolved;
@@ -825,17 +835,15 @@ final class Container implements ContainerInterface, \ArrayAccess
 
     /**
      * 解析单个参数
+     *
+     * @param Inject|null $inject 来自编译元数据的 #[Inject] 分析结果（已缓存，避免重复读属性）
      */
-    private function resolveParameter(ReflectionParameter $parameter, string $class): mixed
+    private function resolveParameter(ReflectionParameter $parameter, string $class, ?Inject $inject = null): mixed
     {
         $name = $parameter->getName();
 
         // 检查 #[Inject] 属性（带显式 id 时优先）。
-        // kode/attributes 2.0+ 的 Attr::instance 可直接以 ReflectionParameter 为目标读取属性实例，
-        // 不再需要绕过到 Attr::reader()->getParameterAttrs()。
-        /** @var Inject|null $inject */
-        $inject = Attr::instance($parameter, Inject::class);
-
+        // $inject 已由 getCompiled() 一次性分析并缓存，这里直接使用，不再重复反射。
         if ($inject !== null && $inject->id !== null) {
             return $this->resolve($inject->id);
         }
@@ -992,22 +1000,21 @@ final class Container implements ContainerInterface, \ArrayAccess
 
     /**
      * 属性注入（支持 #[Inject] 与 #[Autowire]）
+     *
+     * 直接复用编译元数据，不再重复反射与读取属性实例。
+     *
+     * @param CompiledDefinition $def 来自 getCompiled() 的编译元数据
      */
-    /**
-     * @param ReflectionClass<object> $reflector
-     */
-    private function injectProperties(object $instance, ReflectionClass $reflector): object
+    private function injectProperties(object $instance, CompiledDefinition $def): object
     {
-        foreach ($reflector->getProperties() as $property) {
+        foreach ($def->properties as $property) {
             if ($property->isStatic()) {
                 continue;
             }
 
-            // kode/attributes 2.0+ 的 Attr::instance 可直接以 ReflectionProperty 为目标读取属性实例。
-            /** @var Inject|null $inject */
-            $inject = Attr::instance($property, Inject::class);
-            /** @var Autowire|null $autowire */
-            $autowire = $inject === null ? Attr::instance($property, Autowire::class) : null;
+            $meta = $def->propMeta[$property->getName()] ?? ['inject' => null, 'autowire' => null];
+            $inject = $meta['inject'];
+            $autowire = $meta['autowire'];
 
             if ($inject === null && $autowire === null) {
                 continue;
@@ -1027,7 +1034,7 @@ final class Container implements ContainerInterface, \ArrayAccess
                 if ($required) {
                     throw ContainerException::unresolvedParameter(
                         $property->getName(),
-                        $reflector->getName()
+                        $instance::class
                     );
                 }
                 continue;
@@ -1122,13 +1129,14 @@ final class Container implements ContainerInterface, \ArrayAccess
             }
 
             $declaredClass = is_string($target) ? $target : $target::class;
-            $reflection = new ReflectionMethod($declaredClass, $method);
+            $reflection = $this->getMethodReflector($declaredClass, $method);
 
             // 静态方法：无需实例化目标类，直接以 null 为调用实例
             if ($reflection->isStatic()) {
                 $dependencies = $this->resolveDependencies(
                     $reflection->getParameters(),
                     $declaredClass,
+                    [],
                     $parameters
                 );
 
@@ -1155,6 +1163,7 @@ final class Container implements ContainerInterface, \ArrayAccess
             $dependencies = $this->resolveDependencies(
                 $reflection->getParameters(),
                 $declaredClass,
+                [],
                 $parameters
             );
 
@@ -1195,7 +1204,8 @@ final class Container implements ContainerInterface, \ArrayAccess
     private function resolveFunctionDependencies(array $parameters, array $passed = []): array
     {
         // 与构造函数依赖解析共用同一套规则，避免两条路径行为漂移
-        return $this->resolveDependencies($parameters, self::CLOSURE_CONTEXT, $passed);
+        // 闭包/函数参数不读取 #[Inject] 属性（保持既有行为：仅按类型解析）
+        return $this->resolveDependencies($parameters, self::CLOSURE_CONTEXT, [], $passed);
     }
 
     /**
@@ -1445,11 +1455,95 @@ final class Container implements ContainerInterface, \ArrayAccess
     }
 
     /**
+     * 获取（并缓存）编译后的类构建元数据
+     *
+     * 首次解析某类时通过一次反射 + 属性分析生成 {@see CompiledDefinition}，
+     * 之后复用，使每次 build() 不再重复 getConstructor()/getParameters()/getProperties()，
+     * 也不再重复读取 #[Inject]/#[Autowire] 属性实例——这是控制器每请求解析时的主要开销来源。
+     *
+     * 反射与目标类绑定、元数据不可变，按类名跨容器共享且安全。
+     */
+    private function getCompiled(string $class): CompiledDefinition
+    {
+        // 窄化类型：getReflector() 接收 class-string（与 build() 中的 class_exists 守卫一致）
+        if (!class_exists($class)) {
+            throw ContainerException::notInstantiable($class);
+        }
+
+        if (!isset(self::$compiled[$class])) {
+            $reflector = $this->getReflector($class);
+            $constructor = $reflector->getConstructor();
+            $params = $constructor !== null ? $constructor->getParameters() : [];
+
+            $paramInject = [];
+            foreach ($params as $parameter) {
+                /** @var Inject|null $inject */
+                $inject = Attr::instance($parameter, Inject::class);
+                $paramInject[$parameter->getName()] = $inject;
+            }
+
+            $properties = $reflector->getProperties();
+            $propMeta = [];
+            foreach ($properties as $property) {
+                if ($property->isStatic()) {
+                    continue;
+                }
+
+                /** @var Inject|null $inject */
+                $inject = Attr::instance($property, Inject::class);
+                /** @var Autowire|null $autowire */
+                $autowire = $inject === null ? Attr::instance($property, Autowire::class) : null;
+                $propMeta[$property->getName()] = ['inject' => $inject, 'autowire' => $autowire];
+            }
+
+            self::$compiled[$class] = new CompiledDefinition($constructor, $params, $properties, $paramInject, $propMeta);
+        }
+
+        return self::$compiled[$class];
+    }
+
+    /**
+     * 获取（并缓存）方法反射
+     *
+     * 控制器动作（[Controller, 'action'] / Controller::action）解析时复用，避免每次 call() 重新反射。
+     */
+    private function getMethodReflector(string $class, string $method): ReflectionMethod
+    {
+        $key = $class . '::' . $method;
+
+        if (!isset(self::$methodCache[$key])) {
+            self::$methodCache[$key] = new ReflectionMethod($class, $method);
+        }
+
+        return self::$methodCache[$key];
+    }
+
+    /**
+     * 预热编译缓存（控制器 / 服务类启动时预先编译）
+     *
+     * 在应用引导阶段调用，提前对一组类执行反射 + 属性分析，
+     * 使首次请求解析控制器时不产生反射开销（后续解析仍走编译缓存）。
+     *
+     * @param array<int, string> $classes
+     */
+    #[\Override]
+    public function warmup(array $classes): void
+    {
+        foreach ($classes as $class) {
+            if (class_exists($class)) {
+                $this->getCompiled($class);
+            }
+        }
+    }
+
+    /**
      * 清除所有缓存
      */
     public static function clearCache(): void
     {
         self::$reflectionCache = [];
+        self::$compiled = [];
+        self::$methodCache = [];
         self::$contextChecked = false;
         self::$contextAvailable = false;
     }

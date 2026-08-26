@@ -29,6 +29,7 @@
 - **批量解析与按标签重建** - `resolveMany()` 一次性解析多个服务；`refreshTag()` 按标签批量重建单例
 - **延迟调用包裹** - `wrap()` 预注入依赖并返回可延迟调用的闭包
 - **可调用类调用** - `call('Class')` 直接调用带 `__invoke` 的类（依赖由容器注入）
+- **编译 / 反射缓存** - 每个类的构造参数与可注入属性经一次反射 + 属性分析编译为不可变元数据并跨容器复用；`warmup()` 可在启动时预热，控制器每请求解析不再重复反射与读取 `#[Inject]`/`#[Autowire]` 实例
 
 ## 安装
 
@@ -191,6 +192,23 @@ $services = $container->resolveMany([DbInterface::class, CacheInterface::class])
 // 按标签批量重建单例（丢弃实例缓存、不删绑定定义；受冻结守卫约束）
 $rebuilt = $container->refreshTag('cache');
 ```
+
+### 编译缓存与预热
+
+容器在首次解析某个类时，会通过一次反射 + 属性分析将其**编译为不可变元数据**（`CompiledDefinition`）并跨容器缓存：含构造函数参数列表、每个参数的 `#[Inject]` 结果、可注入属性列表及每个属性的 `#[Inject]`/`#[Autowire]` 结果。之后每次 `build()`（含单例重建、原型每次新建）与 `call()` 控制器动作都直接复用该元数据，**不再重复 `getConstructor()`/`getParameters()`/`getProperties()`，也不重复读取属性实例**——这是控制器每请求解析时的主要开销来源。
+
+```php
+// 应用引导阶段预热控制器 / 服务类，使首次请求解析不产生反射开销
+$container->warmup([
+    App\Controllers\HomeController::class,
+    App\Controllers\UserController::class,
+]);
+
+// 静态门面同样可用
+\Kode\DI\ContainerHelper::warmup([App\Controllers\HomeController::class]);
+```
+
+> 编译元数据按类名共享且不可变，跨容器安全；调用 `Container::clearCache()` 会一并清空反射、编译与方法反射缓存（实例缓存不受影响）。
 
 ### 延迟调用包裹
 
@@ -397,6 +415,7 @@ $repo = $container->get(RepositoryInterface::class);
 | `\ArrayAccess` | 实现数组语法 `$c['id']` 读取 / 绑定 / 移除 |
 | `resolved(id)` | 检查是否已解析 |
 | `setAutoResolveImplementations(bool)` | 开启 / 关闭接口·抽象类按命名约定自动定位（默认开启） |
+| `warmup(classes)` | 预热编译缓存：对一组类提前执行反射 + 属性分析，使后续解析走编译缓存、不产生反射开销 |
 
 **上下文与扩展**
 

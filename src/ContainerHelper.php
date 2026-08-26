@@ -87,4 +87,14 @@ final class ContainerHelper
         self::$instance?->flush();
         self::$instance = null;
     }
+
+    /**
+     * 预热编译缓存（控制器 / 服务类启动时预先编译）
+     *
+     * @param array<int, string> $classes
+     */
+    public static function warmup(array $classes): void
+    {
+        self::$instance?->warmup($classes);
+    }
 }
