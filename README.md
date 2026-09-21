@@ -30,6 +30,7 @@
 - **延迟调用包裹** - `wrap()` 预注入依赖并返回可延迟调用的闭包
 - **可调用类调用** - `call('Class')` 直接调用带 `__invoke` 的类（依赖由容器注入）
 - **编译 / 反射缓存** - 每个类的构造参数与可注入属性经一次反射 + 属性分析编译为不可变元数据并跨容器复用；`warmup()` 可在启动时预热，控制器每请求解析不再重复反射与读取 `#[Inject]`/`#[Autowire]` 实例
+- **常驻进程语义稳定** - `extend()` 与解析顺序无关（装饰结果进缓存 / 已解析实例立即作用）、装饰失败不留半成品缓存、接口自动定位共享装饰结果、别名声明期防环且显式绑定优先
 
 ## 安装
 
@@ -277,6 +278,43 @@ $container->resolving(Connection::class, function ($conn, $c) {
 $container->extend(Connection::class, fn($conn, $c) => new TracedConnection($conn));
 ```
 
+#### extend() 的时序语义（常驻进程必读）
+
+`extend()` 与解析的先后顺序不再影响结果，注册时机一律生效：
+
+```php
+$c->singleton(Conn::class, fn() => new Conn());
+
+// ① 解析前注册：装饰结果写入单例缓存（此前缓存里存的是未装饰对象，
+//    第二次 get 会绕过装饰器拿到"裸"实例，且两次返回值身份不一致）
+$c->extend(Conn::class, fn(Conn $x) => new Traced($x));
+$a = $c->get(Conn::class);
+$b = $c->get(Conn::class);   // === $a，同为装饰后实例
+
+// ② 解析后注册：立即作用到已存在的共享实例上（与 Laravel 一致）
+$c->extend(Conn::class, function (Conn $x) { $x->markUsed(); });  // 原地修改，身份保持
+$c->extend(Conn::class, fn(Conn $x) => new Pooled($x));           // 返回新对象，成为新的共享单例
+
+// ③ 装饰器抛异常时不写缓存：resolved() 仍为 false，不会污染成"半装饰"单例
+```
+
+例外：**懒加载**条目（`lazy()`）缓存的是代理对象，扩展器在代理首次实现时执行，
+因此需在首次取用之前注册；把代理直接交给装饰闭包会因类型不匹配抛 `TypeError`。
+
+#### 别名与显式绑定的优先级
+
+```php
+$c->alias('db', Connection::class);
+$c->singleton('db', fn() => new SqliteConnection());   // 显式绑定优先，条目不会静默失效
+
+$c->get('db');            // SqliteConnection（命中显式绑定）
+$c->forget('db');
+$c->get('db');            // 别名恢复生效 → Connection::class
+```
+
+`alias()` 在**声明期**拒绝成环（含自引用），并限制解析跳数（`Container::MAX_ALIAS_HOPS = 64`）：
+环路会让 `resolveAlias()` 永不收敛，常驻 worker 表现为静默空转到死，故必须尽早抛错。
+
 ### 条件注册与环境
 
 `environment()` 支持传入自定义环境来源（便于测试），未传入时回退读取 `$_ENV` / `$_SERVER`。
@@ -375,6 +413,11 @@ $container->resolving('*', function ($instance, $c) {
 $repo = $container->get(RepositoryInterface::class);
 ```
 
+自动定位后，接口 id 自身会参与实例缓存：当实现按单例/懒加载/实例绑定注册时，
+挂在接口 id 上的 `extend()` 装饰器**只执行一次**，且无装饰器时 `get(接口)` 与 `get(实现)`
+返回同一对象（否则每次 `get(接口)` 都新建装饰包装，常驻进程内会层层套娃且身份不一致）；
+实现未绑定（原型语义）时行为不变，仍每次新建。
+
 ## API 参考
 
 ### Container
@@ -392,7 +435,7 @@ $repo = $container->get(RepositoryInterface::class);
 | `bindIf(id, concrete, lifecycle)` | 未绑定时才绑定 |
 | `singletonIf(id, concrete)` | 未绑定时才绑定单例 |
 | `instanceIf(id, instance)` | 未绑定时才绑定实例 |
-| `alias(alias, id)` | 设置别名 |
+| `alias(alias, id)` | 设置别名；声明期拒绝成环，别名键上存在显式绑定时绑定优先 |
 | `bound(id)` | 是否已绑定（含别名 / 实例） |
 
 **解析**
@@ -423,7 +466,7 @@ $repo = $container->get(RepositoryInterface::class);
 |------|------|
 | `when(consumer)->needs(dep)->give(impl)` | 上下文绑定 |
 | `addContextualBinding(when, needs, give)` | 直接添加上下文绑定 |
-| `extend(id, callback)` | 装饰服务（返回值替换实例） |
+| `extend(id, callback)` | 装饰服务（返回值替换实例）；解析前注册装饰结果入缓存，解析后注册立即作用到共享实例 |
 | `resolving(id, callback)` | 解析时观察者（不改变实例） |
 | `afterResolving(id, callback)` | 解析后观察者（不改变实例） |
 | `rebinding(id, callback)` | 重新绑定回调 |

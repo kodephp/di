@@ -38,6 +38,9 @@ final class Container implements ContainerInterface, \ArrayAccess
     /** 闭包/函数依赖解析时使用的消费者上下文标识 */
     private const CLOSURE_CONTEXT = '{closure}';
 
+    /** 别名解析最大跳数：环路或异常配置下的兜底保护 */
+    public const int MAX_ALIAS_HOPS = 64;
+
     /** @var array<string, Binding> 服务绑定 */
     private array $bindings = [];
 
@@ -243,17 +246,65 @@ final class Container implements ContainerInterface, \ArrayAccess
     {
         $this->assertNotFrozen("设置别名：{$alias} -> {$id}");
 
+        // 环路（含自引用）会让 resolveAlias 永不收敛，常驻进程内表现为 worker 静默空转到死，
+        // 因此在声明期直接拒绝：沿 $id 已有的别名链走一圈，回到 $alias 即为环。
+        $seen = [];
+        $next = $id;
+
+        while (true) {
+            if ($next === $alias || isset($seen[$next])) {
+                throw ContainerException::aliasCycle($alias, $id);
+            }
+
+            $seen[$next] = true;
+
+            if (!isset($this->aliases[$next])) {
+                break;
+            }
+
+            $next = $this->aliases[$next];
+
+            if (count($seen) > self::MAX_ALIAS_HOPS) {
+                throw ContainerException::aliasChainTooLong($id, self::MAX_ALIAS_HOPS);
+            }
+        }
+
         $this->aliases[$alias] = $id;
     }
 
     /**
      * 扩展服务（在服务解析后执行回调）
+     *
+     * 若该 id 的单例已解析，扩展器立即作用到共享实例上（与 Laravel 语义一致），
+     * 否则解析之后注册的扩展会被实例缓存永久吞掉。
+     * 懒加载条目例外：缓存的是代理对象，扩展器留待代理实现时执行，故请在首次取用前注册。
      */
     #[\Override]
     public function extend(string $id, Closure $callback): void
     {
         $id = $this->resolveAlias($id);
         $this->assertNotFrozen("扩展服务：{$id}");
+
+        $shared = $this->instances[$id] ?? null;
+        $binding = $this->bindings[$id] ?? null;
+
+        // 把懒加载代理交给装饰闭包会因类型不匹配直接 TypeError（代理是匿名类，不是目标类型）
+        $isLazyProxy = $binding !== null && $binding->isLazy();
+
+        if (is_object($shared) && !$isLazyProxy) {
+            $extended = $callback($shared, $this);
+
+            // 返回非对象视为「仅观察」，保留原实例，避免误吞服务
+            if (is_object($extended)) {
+                $this->instances[$id] = $extended;
+
+                if ($binding !== null) {
+                    $binding->setInstance($extended);
+                }
+            }
+
+            return;
+        }
 
         $this->extenders[$id][] = $callback;
     }
@@ -502,8 +553,15 @@ final class Container implements ContainerInterface, \ArrayAccess
                     // 仍以原始 id（接口/抽象类）为粒度触发扩展器与解析回调，
                     // 保证注册在接口 id 上的观察者/装饰器与解析出的实现类一致触发。
                     $instance = $this->resolve($impl, $parameters);
+                    $decorated = $this->applyExtenders($id, $instance);
 
-                    return $this->applyExtenders($id, $instance);
+                    // 实现为共享生命周期时，接口 id 自身也要缓存：否则每次 get(接口) 都重跑扩展器，
+                    // 常驻进程内表现为装饰器层层套娃（内存随请求增长）且同一单例身份不一致。
+                    if ($this->isShared($impl)) {
+                        $this->instances[$id] = $decorated;
+                    }
+
+                    return $decorated;
                 }
             }
 
@@ -564,13 +622,15 @@ final class Container implements ContainerInterface, \ArrayAccess
 
         try {
             $instance = $this->buildBinding($binding, $parameters);
+            $instance = $this->applyExtenders($id, $instance);
 
             if ($binding->isSingleton()) {
+                // 缓存「装饰后」的实例：先写缓存会让后续 get 绕过扩展器（返回值与缓存值不一致），
+                // 且扩展器抛错时缓存已被半成品污染。
                 $binding->setInstance($instance);
                 $this->instances[$id] = $instance;
             }
 
-            $instance = $this->applyExtenders($id, $instance);
             unset($this->resolving[$id]);
 
             return $instance;
@@ -687,12 +747,20 @@ final class Container implements ContainerInterface, \ArrayAccess
 
     /**
      * 解析别名
+     *
+     * 别名键上若已有显式绑定，则该绑定优先（否则条目永远读不到 = 静默失效）；
+     * 环路已在 alias() 声明期拦截，这里保留跳数上限，确保任何状态下都不会空转。
      */
     private function resolveAlias(string $id): string
     {
-        while (isset($this->aliases[$id])) {
+        for ($hop = 0; isset($this->aliases[$id]) && !isset($this->bindings[$id]); $hop++) {
+            if ($hop >= self::MAX_ALIAS_HOPS) {
+                throw ContainerException::aliasChainTooLong($id, self::MAX_ALIAS_HOPS);
+            }
+
             $id = $this->aliases[$id];
         }
+
         return $id;
     }
 

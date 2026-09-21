@@ -35,6 +35,22 @@ final class ContainerException extends RuntimeException implements ContainerExce
     }
 
     /**
+     * 创建别名成环异常（解析时无法收敛，常驻进程会原地空转）
+     */
+    public static function aliasCycle(string $alias, string $target): self
+    {
+        return new self("别名成环: {$alias} -> {$target} -> ... -> {$alias}");
+    }
+
+    /**
+     * 创建别名链过长异常（解析中途发现环路或链路过深时的兜底保护）
+     */
+    public static function aliasChainTooLong(string $id, int $maxHops): self
+    {
+        return new self("别名解析超过最大跳数 {$maxHops}（疑似别名环路），起点: {$id}");
+    }
+
+    /**
      * 创建未找到绑定异常
      */
     public static function bindingNotFound(string $id): self
