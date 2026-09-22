@@ -74,6 +74,9 @@ class UserService
 }
 ```
 
+`required: false` 的语义是「服务没注册就跳过这个注入」，属性保留默认值；默认 `required: true` 时未注册直接抛
+`ServiceNotFoundException`。可选性只吞「服务未找到」——循环依赖、构建失败仍照抛，不会被静默掩盖。
+
 ### 生命周期类型
 
 | 类型 | 方法 | 说明 |
@@ -94,6 +97,9 @@ ContextualContainer::setContainer($container);
 // 每个协程拥有独立实例
 ContextualContainer::resolve(DatabaseConnection::class);
 ```
+
+上下文绑定每次解析都新建实例（不走 `instances` 缓存），因此与普通绑定同样受循环依赖守卫保护：
+两个互相依赖的上下文服务会得到 `ContainerException: 检测到循环依赖`，而不是把常驻 worker 递归到内存耗尽。
 
 ### 服务提供者
 
@@ -483,7 +489,7 @@ $repo = $container->get(RepositoryInterface::class);
 | `environment(envs, callback, env?)` | 按环境条件注册（`env` 可注入，便于测试） |
 | `if(bool\|Closure, true, false?)` | 按条件注册，条件支持闭包延迟求值 |
 | `forget(id)` | 移除绑定及其实例 / 扩展器 / 上下文 |
-| `flush()` | 清空容器 |
+| `flush()` | 清空业务绑定；容器自注册（`container` / `ContainerInterface` / `Container`）随后自动补回 |
 | `freeze()` / `isFrozen()` | 冻结容器 / 查询是否冻结（冻结后禁止运行时增删·变更绑定） |
 | `Container::clearCache()` | 清空全局反射缓存 |
 
@@ -492,7 +498,7 @@ $repo = $container->get(RepositoryInterface::class);
 | 属性 | 目标 | 说明 |
 |------|------|------|
 | `#[Inject]` | Property, Parameter | 标记注入点 |
-| `#[Autowire]` | Class, Property, Method | 启用自动装配 |
+| `#[Autowire]` | Class, Property, Method | 启用自动装配；属性上写 `#[Autowire(false)]` 即显式关掉该属性的装配 |
 | `#[Singleton]` | Class | 标记为单例 |
 | `#[Prototype]` | Class | 标记为原型 |
 | `#[Contextual]` | Class | 标记为上下文隔离 |
@@ -572,7 +578,7 @@ composer check          # PHPStan level=max 静态分析
 composer fix            # php-cs-fixer 按 PSR-12 格式化
 ```
 
-当前状态：**63 个测试 / 98 处断言全部通过**，PHPStan `level=max` **零告警**。
+当前状态：**148 个测试 / 250 处断言全部通过**，PHPStan `level=max` **零告警**。
 
 ## 许可证
 

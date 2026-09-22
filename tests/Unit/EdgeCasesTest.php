@@ -6,6 +6,7 @@ namespace Kode\DI\Tests\Unit;
 
 use Kode\DI\Container;
 use Kode\DI\ContainerHelper;
+use Kode\DI\Contract\ContainerInterface;
 use Kode\DI\Exception\ContainerException;
 use Kode\DI\Exception\ServiceNotFoundException;
 use Kode\DI\ServiceProvider;
@@ -115,7 +116,13 @@ class EdgeCasesTest extends TestCase
 
         $this->container->flush();
 
-        $this->assertSame([], $this->container->getBindings());
+        // flush 清业务绑定，但容器自注册必须保留（v2.5.0）：清掉后 get('container') 抛「服务未找到」，
+        // 而 get(self::class) 会经自动解析造出第二个容器接管后续绑定。
+        $remaining = $this->container->getBindings();
+        sort($remaining);
+        $selfIds = [ContainerInterface::class, Container::class, 'container'];
+        sort($selfIds);
+        $this->assertSame($selfIds, $remaining);
         $this->assertSame([], $this->container->getAliases());
         $this->assertFalse($this->container->resolved(EcContract::class));
     }

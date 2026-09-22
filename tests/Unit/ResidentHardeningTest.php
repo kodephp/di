@@ -244,6 +244,57 @@ final class ResidentHardeningTest extends TestCase
         $this->expectException(\LogicException::class);
         $container->extend(Decorated::class, static fn(Decorated $d): Decorated => $d);
     }
+
+    /**
+     * 上下文隔离绑定不进 instances 缓存，此前也不置循环守卫标记，
+     * 于是互相依赖的两个上下文服务会把 worker 递归到内存耗尽（普通绑定只抛异常）。
+     */
+    public function testContextualCycleIsDetectedLikePlainBinding(): void
+    {
+        $container = new Container();
+        $container->contextual(CycleA::class, CycleA::class);
+        $container->contextual(CycleB::class, CycleB::class);
+
+        try {
+            $container->get(CycleA::class);
+            $this->fail('上下文绑定的循环依赖必须抛 ContainerException，而不是无限递归');
+        } catch (ContainerException $e) {
+            $this->assertStringContainsString('循环依赖', $e->getMessage());
+        }
+    }
+
+    /** 守卫按调用栈粒度生效：菱形依赖（两条分支共用同一上下文服务）不得被误判成环。 */
+    public function testContextualDiamondStillResolves(): void
+    {
+        $container = new Container();
+        $container->contextual(SharedLeaf::class, SharedLeaf::class);
+
+        $left = $container->get(LeftNode::class);
+        $right = $container->get(RightNode::class);
+
+        $this->assertInstanceOf(SharedLeaf::class, $left->leaf);
+        $this->assertInstanceOf(SharedLeaf::class, $right->leaf);
+    }
+
+    /** required:false 配显式 id：服务未注册时跳过注入（README 的 cache.ttl 示例语义）。 */
+    public function testOptionalInjectSkipsMissingService(): void
+    {
+        $container = new Container();
+        $host = $container->get(InjectHost::class);
+        $this->assertSame('unset', $host->ttl, '未注册的可选依赖应保持属性原值');
+
+        $container->singleton('cache.ttl', static fn(): int => 300);
+        $this->assertSame(300, $container->get(InjectHost::class)->ttl, '注册后即应注入真值');
+    }
+
+    /** 可选性只吞「服务未找到」，默认 required:true 必须照抛。 */
+    public function testRequiredInjectStillThrowsOnMissingService(): void
+    {
+        $container = new Container();
+
+        $this->expectException(\Kode\DI\Exception\ServiceNotFoundException::class);
+        $container->get(RequiredInjectHost::class);
+    }
 }
 
 interface ResidentRepo
@@ -266,4 +317,48 @@ final class Decorated
     public function __construct(public string $tag)
     {
     }
+}
+
+final class CycleA
+{
+    public function __construct(public CycleB $b)
+    {
+    }
+}
+
+final class CycleB
+{
+    public function __construct(public CycleA $a)
+    {
+    }
+}
+
+final class SharedLeaf
+{
+}
+
+final class LeftNode
+{
+    public function __construct(public SharedLeaf $leaf)
+    {
+    }
+}
+
+final class RightNode
+{
+    public function __construct(public SharedLeaf $leaf)
+    {
+    }
+}
+
+final class InjectHost
+{
+    #[\Kode\DI\Attributes\Inject(id: 'cache.ttl', required: false)]
+    public mixed $ttl = 'unset';
+}
+
+final class RequiredInjectHost
+{
+    #[\Kode\DI\Attributes\Inject(id: 'cache.ttl')]
+    public mixed $ttl = 'unset';
 }

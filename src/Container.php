@@ -398,6 +398,12 @@ final class Container implements ContainerInterface, \ArrayAccess
             return true;
         }
 
+        // 接口/抽象类可经命名约定自动定位实现，get() 能拿到实例，has() 就不能报 false：
+        // 否则框架侧「先 has 再 get」的门禁（如 Facade 代理）会对这类 id 永久哑火。
+        if ($this->autoResolveImplementations && $this->resolveImplementationClass($id) !== null) {
+            return true;
+        }
+
         return $this->providerRegistry !== null && $this->providerRegistry->hasDeferred($id);
     }
 
@@ -459,6 +465,11 @@ final class Container implements ContainerInterface, \ArrayAccess
         $this->methodBindings = [];
         $this->providerRegistry = null;
         $this->contextualBuilder = null;
+
+        // 自注册（container / ContainerInterface / self）也是绑定，清完必须补回：
+        // 否则 flush 后 get('container') 直接抛「服务未找到」，而 get(self::class) 会
+        // 自动解析出一个全新容器接管后续绑定（幽灵容器，老容器上的监听器再也收不到事件）。
+        $this->registerSelf();
     }
 
     /**
@@ -600,9 +611,17 @@ final class Container implements ContainerInterface, \ArrayAccess
             }
         }
 
-        // 上下文隔离服务
+        // 上下文隔离服务：守卫必须在 buildBinding 前置位。上下文绑定每次解析都新建实例、
+        // 不进 instances 缓存，缺这道守卫时互相依赖的两个上下文服务会无限递归直到内存耗尽
+        // （普通绑定走下面的 621 行守卫，此前只有这条路径漏了）。
         if ($binding->isContextual()) {
-            return $this->resolveContextual($id, $binding, $parameters);
+            $this->resolving[$id] = true;
+
+            try {
+                return $this->resolveContextual($id, $binding, $parameters);
+            } finally {
+                unset($this->resolving[$id]);
+            }
         }
 
         // 懒加载服务（代理只创建一次）
@@ -1088,6 +1107,12 @@ final class Container implements ContainerInterface, \ArrayAccess
                 continue;
             }
 
+            // #[Autowire(false)] 单独出现时 = 关掉该属性的自动装配（此前 enabled 从未被读取，
+            // 写了 false 与不写等价）；与 #[Inject] 并存时以 Inject 为准，不受此处影响。
+            if ($inject === null && $autowire !== null && !$autowire->enabled) {
+                continue;
+            }
+
             $serviceId = $inject?->id;
             $required = $inject === null || $inject->required;
 
@@ -1108,7 +1133,18 @@ final class Container implements ContainerInterface, \ArrayAccess
                 continue;
             }
 
-            $value = $this->resolve($serviceId);
+            // required:false 的语义 = 「服务没注册就跳过这个注入」，此前只在「推不出服务 id」时生效，
+            // 显式写了 id 反而照样抛异常（README 的 cache.ttl 示例即此情形）。
+            // 只吞「服务未找到」：循环依赖/构建失败是真错误，不该被可选性掩盖。
+            try {
+                $value = $this->resolve($serviceId);
+            } catch (ServiceNotFoundException $e) {
+                if (!$required) {
+                    continue;
+                }
+
+                throw $e;
+            }
 
             if (!$property->isPublic()) {
                 $property->setAccessible(true);
