@@ -498,7 +498,7 @@ $repo = $container->get(RepositoryInterface::class);
 | 属性 | 目标 | 说明 |
 |------|------|------|
 | `#[Inject]` | Property, Parameter | 标记注入点 |
-| `#[Autowire]` | Class, Property, Method | 启用自动装配；属性上写 `#[Autowire(false)]` 即显式关掉该属性的装配 |
+| `#[Autowire]` | Property（类/方法位置仅为声明保留，容器不读取） | 属性上写 `#[Autowire]` = 该属性按类型注入；写 `#[Autowire(false)]` = 显式关掉该属性的装配。想让某属性被注入，注解必须写在该属性上，写在类上不产生任何效果 |
 | `#[Singleton]` | Class | 标记为单例 |
 | `#[Prototype]` | Class | 标记为原型 |
 | `#[Contextual]` | Class | 标记为上下文隔离 |
