@@ -1,15 +1,15 @@
 # kode/di
 
-[![PHP Version](https://img.shields.io/badge/PHP-%3E%3D8.3-8892BF)](https://php.net/)
+[![PHP Version](https://img.shields.io/badge/PHP-%3E%3D8.4-8892BF)](https://php.net/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![PSR-11](https://img.shields.io/badge/PSR-11-Compatible-blue)](https://www.php-fig.org/psr/psr-11/)
 
-高性能 PHP 8.3+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11。
+高性能 PHP 8.4+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11。
 
 ## 特性
 
 - **PSR-11 兼容** - 实现标准容器接口
-- **属性注入** - 基于 PHP 8.3+ Attributes 实现声明式注入
+- **属性注入** - 基于 PHP 8.4+ Attributes 实现声明式注入
 - **生命周期管理** - 单例/原型/懒加载/上下文隔离
 - **上下文绑定** - `when()->needs()->give()` 按消费者定制依赖
 - **服务提供者** - 支持立即注册与延迟（deferred）按需加载
@@ -19,7 +19,7 @@
 - **类型健壮** - 联合类型/交叉类型/可空类型/可变参数完整支持
 - **零全局状态** - 无全局变量污染
 - **静态分析友好** - PHPStan `level=max` 零告警
-- **框架无关** - 可在任何 PHP 8.3+ 项目中使用
+- **框架无关** - 可在任何 PHP 8.4+ 项目中使用
 - **数组语法访问** - 实现 `\ArrayAccess`，可用 `$c['id']` 读取 / 绑定 / 移除服务
 - **强制重建与冻结** - `refresh()` 重建单例；`freeze()` 锁定容器防止运行时被改
 - **安全获取** - `getOr()` 在未绑定服务时返回默认值而非抛异常

@@ -1355,20 +1355,59 @@ final class Container implements ContainerInterface, \ArrayAccess
 
     /**
      * 创建原生懒加载代理 (PHP 8.4+)
+     *
+     * 原生代理要求反射目标是**具体类**，且初始化器返回同class实例；
+     * 闭包 concrete 若无声明返回类型（或返回类型无法解析为类），
+     * 回退到传统匿名类代理，避免生成一个 stdClass 空壳代理
+     *（8.4.26 实测：stdClass 代理 + 返回异类实例 => 调用真实方法直接 fatal）。
      */
     private function createNativeLazyProxy(string $id, Binding $binding): mixed
     {
-        $concrete = $binding->getConcrete();
-        $className = is_string($concrete) && class_exists($concrete)
-            ? $concrete
-            : \stdClass::class;
+        $className = $this->resolveLazyProxyClass($binding);
+
+        if ($className === null) {
+            return $this->createLegacyLazyProxy($binding);
+        }
 
         $reflector = $this->getReflector($className);
 
         /** @phpstan-ignore-next-line method.exists (ReflectionClass::newLazyProxy 需 PHP 8.4+) */
+        if (!method_exists($reflector, 'newLazyProxy')) {
+            return $this->createLegacyLazyProxy($binding);
+        }
+
+        /** @phpstan-ignore-next-line method.exists */
         return $reflector->newLazyProxy(function () use ($binding) {
             return $this->buildBindingPublic($binding);
         });
+    }
+
+    /**
+     * 解析懒加载代理可反射的具体类名；无法解析时返回 null（走传统代理）。
+     */
+    private function resolveLazyProxyClass(Binding $binding): ?string
+    {
+        $concrete = $binding->getConcrete();
+
+        if (is_string($concrete) && class_exists($concrete)) {
+            return $concrete;
+        }
+
+        if ($concrete instanceof \Closure) {
+            try {
+                $returnType = (new \ReflectionFunction($concrete))->getReturnType();
+            } catch (\ReflectionException) {
+                return null;
+            }
+            if ($returnType instanceof \ReflectionNamedType
+                && !$returnType->isBuiltin()
+                && class_exists($returnType->getName())
+            ) {
+                return $returnType->getName();
+            }
+        }
+
+        return null;
     }
 
     /**
