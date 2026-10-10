@@ -1,5 +1,6 @@
 {
     "name": "kode/di",
+    "version": "2.5.1",
     "type": "library",
     "description": "高性能 PHP 8.3+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11",
     "keywords": ["di", "ioc", "container", "dependency-injection", "psr-11", "attribute", "fiber", "coroutine", "kodephp", "php8.3"],
