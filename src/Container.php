@@ -1073,10 +1073,8 @@ final class Container implements ContainerInterface, \ArrayAccess
             }
 
             // 校验候选实例是否满足交叉类型的全部约束
-            foreach ($names as $constraint) {
-                if (!$instance instanceof $constraint) {
-                    continue 2;
-                }
+            if (!array_all($names, fn($constraint) => $instance instanceof $constraint)) {
+                continue;
             }
 
             return ['resolved' => true, 'value' => $instance];
@@ -1854,16 +1852,11 @@ final class Container implements ContainerInterface, \ArrayAccess
             $namespace . $base . 'Factory',
         ]);
 
-        foreach ($candidates as $candidate) {
-            if ($candidate !== $id && class_exists($candidate)) {
-                $reflector = $this->getReflector($candidate);
-                if ($reflector->isInstantiable()) {
-                    return $candidate;
-                }
-            }
-        }
-
-        return null;
+        return array_find(
+            $candidates,
+            fn($candidate) => $candidate !== $id && class_exists($candidate)
+                && $this->getReflector($candidate)->isInstantiable()
+        );
     }
 
     /**
