@@ -9,7 +9,6 @@ use ReflectionClass;
 use ReflectionMethod;
 use ReflectionFunction;
 use ReflectionParameter;
-use ReflectionProperty;
 use ReflectionNamedType;
 use ReflectionUnionType;
 use ReflectionIntersectionType;

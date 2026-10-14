@@ -1,6 +1,6 @@
 {
     "name": "kode/di",
-    "version": "3.0.2",
+    "version": "3.0.3",
     "type": "library",
     "description": "高性能 PHP 8.4+ 依赖注入容器，支持属性注入、生命周期管理、协程上下文隔离，兼容 PSR-11",
     "keywords": [
