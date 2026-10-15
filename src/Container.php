@@ -673,7 +673,7 @@ final class Container implements ContainerInterface, \ArrayAccess
      *
      * 支持闭包、数组可调用（[对象/类, 方法]）、静态方法字符串（'Class::method'）与可调用类字符串（'Class'，需带 __invoke）。
      *
-     * @param callable|array{0: object|string, 1: string}|string $callback
+     * @param callable|array<mixed>|string $callback 数组形态按运行期校验（可能是非法的裸数组）
      * @param array<string, mixed> $parameters
      */
     #[\Override]
@@ -1106,7 +1106,8 @@ final class Container implements ContainerInterface, \ArrayAccess
 
             // #[Autowire(false)] 单独出现时 = 关掉该属性的自动装配（此前 enabled 从未被读取，
             // 写了 false 与不写等价）；与 #[Inject] 并存时以 Inject 为准，不受此处影响。
-            if ($inject === null && $autowire !== null && !$autowire->enabled) {
+            // 走到这里 $autowire 必非空（上方 inject/autowire 双空已 continue）
+            if ($inject === null && !$autowire->enabled) {
                 continue;
             }
 
@@ -1211,7 +1212,7 @@ final class Container implements ContainerInterface, \ArrayAccess
     /**
      * 调用方法并注入依赖
      *
-     * @param callable|array{0: object|string, 1: string}|string $callback
+     * @param callable|array<mixed>|string $callback 数组形态按运行期校验（可能是非法的裸数组）
      * @param array<string, mixed> $parameters
      */
     private function callMethod(callable|array|string $callback, array $parameters = []): mixed
